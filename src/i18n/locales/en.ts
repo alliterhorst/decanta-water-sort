@@ -59,12 +59,14 @@ export const en: Dictionary = {
     chefaoDerrotado: '⚔ Boss Defeated!',
     preparandoBatalha: 'Preparing battle…',
     preparandoFase: 'Preparing level…',
+    erroPreparandoFase: 'Could not prepare the level. Please try again.',
   },
 
   shop: {
     title: 'Shop',
     fundos: 'Backgrounds',
-    estilosDeTubo: 'Tube styles',
+    corDoTubo: 'Tube color',
+    formatoDoTubo: 'Tube shape',
     emUso: 'In use',
     equipar: 'Equip',
     gratis: 'Free',
@@ -190,6 +192,13 @@ export const en: Dictionary = {
       esmeralda: 'Emerald',
       rose: 'Rosé',
       ouro: 'Old Gold',
+    },
+    shape: {
+      classica: 'Classic',
+      proveta: 'Test Tube',
+      farmacia: 'Apothecary',
+      erlenmeyer: 'Erlenmeyer',
+      balao: 'Flask',
     },
   },
 

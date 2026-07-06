@@ -6,7 +6,8 @@ import { cloneState } from './core/engine';
 import { solverClient } from './core/worker/client';
 import { levelConfig, diffKey, starsFor } from './game/levels';
 import { MODES, type JourneyMode } from './game/modes';
-import { loadWallet, saveWallet, rewardFor, activeBg, activeTube, type Wallet, type BgTheme, type TubeStyle, type ShopItem } from './game/economy';
+import { loadWallet, saveWallet, rewardFor, activeBg, activeTube, type Wallet, type ShopItem } from './game/economy';
+import { TUBE_SHAPE_SPECS, CLASSIC_SHAPE } from './render/geometry';
 import { loadProgress, saveProgress, loadDaily, saveDaily, loadSession, saveSession, clearSession, loadPrefs, savePrefs, type DailyRecord, type GameSession } from './game/settings';
 import { ShopModal } from './ui/ShopModal';
 import { BossIntroScreen } from './ui/BossIntroScreen';
@@ -15,8 +16,8 @@ import { AjustesModal } from './ui/AjustesModal';
 import { ModeSelector } from './ui/ModeSelector';
 import { WildTutorial } from './ui/WildTutorial';
 import { bossAfterPhase, BOSSES, type BossData } from './game/boss';
-import { audio, tracksByMood, MUSIC_TRACKS, ONBOARDING_TRACK } from './audio/engine';
-import type { MusicTrack } from './audio/engine';
+import { audio, MUSIC_TRACKS, ONBOARDING_TRACK } from './audio/engine';
+import type { MusicTrack, MusicMood } from './audio/engine';
 import type { LevelConfig, GeneratedLevel } from './core/generator';
 import { isFullscreenAvailable, isFullscreenActive, toggleFullscreen, isMobileDevice, isStandalone } from './lib/fullscreen';
 import { ImmersionOnboarding } from './ui/ImmersionOnboarding';
@@ -25,9 +26,29 @@ import { useT } from './i18n/context';
 type Screen = 'menu' | 'game';
 type GameMode = 'journey' | 'daily';
 
+/** The last dynamic tracks played (most recent last) — excluded from the next draw so the mix
+ *  never repeats back-to-back. Module state on purpose: survives menu↔game navigation. */
+const recentDynamicTracks: string[] = [];
+const RECENT_EXCLUDED = 2;
+
+/** Mood weight per phase — a GRADUAL curve instead of the old binary cut (calm until phase 8,
+ *  then upbeat/epic only, which collapsed the whole late game onto the same 2-3 loud tracks).
+ *  Intensity t ramps 0→1 across phases 1→35; every mood keeps a non-zero weight at every
+ *  phase, so calm tracks still appear late (less often) and epic ones appear early (rarely) —
+ *  a proportional dynamic mix over all 9 tracks. */
+function moodWeightAt(phaseIndex: number): Record<MusicMood, number> {
+  const t = Math.min(1, Math.max(0, (phaseIndex - 1) / 34));
+  return {
+    calm:   1.0 - 0.62 * t, // 1.00 → 0.38
+    upbeat: 0.25 + 0.45 * t, // 0.25 → 0.70
+    epic:   0.10 + 0.90 * t, // 0.10 → 1.00
+    boss:   0,               // reserved track, never drawn dynamically
+  };
+}
+
 /** Selects the BGM track based on phase and boss state.
  *  If prefs.musicTrack is set to a specific track ID, that always wins.
- *  If 'dynamic' (or unset), the track is chosen by difficulty. */
+ *  If 'dynamic' (or unset), the track is drawn by the weighted mood mix above. */
 function selectTrackForPhase(
   phaseIndex: number,
   bossActive: boolean,
@@ -44,17 +65,21 @@ function selectTrackForPhase(
   // phase 2 onward. (Daily always calls with phaseIndex 0, so it gets the same fixed track on
   // every attempt.)
   if (phaseIndex === 0) return ONBOARDING_TRACK;
-  // Dynamic selection by difficulty: calm in low phases, upbeat+epic in high ones.
-  // Rotates within the mood pool so the journey doesn't repeat a single track.
-  // 'upbeat' alone has only 1 track (Retro/calm4): above phase 8, every phase would get stuck on
-  // it forever (pool[i % 1] === pool[0] always), and no preference change could "unstick" it
-  // because the problem was never the preference — it was the pool having size 1. We merge it
-  // with 'epic' (4 dramatic tracks, already normalized — see MUSIC_GAINS in engine.ts), which
-  // was previously only reachable by manually choosing it in the picker, to give real variety in
-  // the hard phases.
-  const pool = phaseIndex > 8 ? [...tracksByMood('upbeat'), ...tracksByMood('epic')] : tracksByMood('calm');
+  // Weighted draw over the whole manifest, excluding the last RECENT_EXCLUDED tracks played.
+  const weights = moodWeightAt(phaseIndex);
+  let pool = MUSIC_TRACKS.filter(t => weights[t.mood] > 0 && !recentDynamicTracks.includes(t.id));
+  if (pool.length === 0) pool = MUSIC_TRACKS.filter(t => weights[t.mood] > 0);
   if (pool.length === 0) return MUSIC_TRACKS[0]?.id ?? 'menu';
-  return pool[phaseIndex % pool.length].id;
+  const total = pool.reduce((s, t) => s + weights[t.mood], 0);
+  let r = Math.random() * total;
+  let chosen = pool[pool.length - 1];
+  for (const t of pool) {
+    r -= weights[t.mood];
+    if (r <= 0) { chosen = t; break; }
+  }
+  recentDynamicTracks.push(chosen.id);
+  if (recentDynamicTracks.length > RECENT_EXCLUDED) recentDynamicTracks.shift();
+  return chosen.id;
 }
 
 /** MENU screen track: respects the player's preference (a specific chosen track always wins).
@@ -72,6 +97,11 @@ function selectMenuTrack(musicTrackPref?: string): MusicTrack {
 
 function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+/** Resolves an equipped tube-shape id to its geometry spec (falls back to the classic bottle). */
+function shapeSpecFor(id: string) {
+  return TUBE_SHAPE_SPECS[id] ?? CLASSIC_SHAPE;
 }
 
 export function App() {
@@ -272,11 +302,12 @@ export function App() {
       window.addEventListener('resize', onResize);
       document.addEventListener('visibilitychange', onVisibility);
 
-      // Apply saved theme
+      // Apply saved theme + equipped tube shape
       const w = loadWallet();
       const bg = activeBg(w);
       const tube = activeTube(w);
       scene.setTheme(bg.deep, tube.rim);
+      scene.setTubeShape(shapeSpecFor(w.tubeShape));
 
       // Check for in-progress session — show "Continuar" button, don't auto-navigate.
       // Boss sessions (phase === -1) now carry bossId + parentPhase so they can be
@@ -312,6 +343,25 @@ export function App() {
     };
   }, [mode, phase, optimalMoves]);
 
+  /** Last-resort recovery when level generation FAILS (worker died twice / timed out): clears
+   *  every overlay that could pin a black screen, restores the normal theme, and lands on the
+   *  menu with a toast — the player retries with one tap. Without this, a dead worker meant a
+   *  permanently black transition that only closing the app resolved (real field report). */
+  const recoverFromGenerationFailure = useCallback(() => {
+    setGenerating(false);
+    setTransitioning(false);
+    setWon(false);
+    setPendingBoss(null);
+    setBossActive(false);
+    sceneRef.current?.disableBossMode();
+    currentBossRef.current = null;
+    const w = loadWallet();
+    sceneRef.current?.setTheme(activeBg(w).deep, activeTube(w).rim);
+    setScreen('menu');
+    void audio.startMusic(selectMenuTrack(loadPrefs().musicTrack));
+    setToast({ msg: t.hud.erroPreparandoFase, id: Date.now() });
+  }, [t]);
+
   const loadJourneyPhase = useCallback((phaseIndex: number, jMode?: JourneyMode) => {
     const s = sceneRef.current;
     if (!s) return;
@@ -341,8 +391,8 @@ export function App() {
       setTubesLeft(mCfg.maxExtraTubes);
       setGenerating(false);
       setTransitioning(false);
-    });
-  }, []);
+    }).catch(recoverFromGenerationFailure);
+  }, [recoverFromGenerationFailure]);
 
   const loadDailyChallenge = useCallback(() => {
     const s = sceneRef.current;
@@ -375,8 +425,8 @@ export function App() {
       setHintsLeft(-1);
       setTubesLeft(-1);
       setGenerating(false);
-    });
-  }, []);
+    }).catch(recoverFromGenerationFailure);
+  }, [recoverFromGenerationFailure]);
 
   // Victory: reward + save progress + check for boss
   useEffect(() => {
@@ -489,8 +539,8 @@ export function App() {
       s.setPowerUpLimits(bossCfg.maxUndos, bossCfg.maxHints, bossCfg.maxExtraTubes);
       s.enableBossMode(boss.floodInterval, boss.floodCount);
       setGenerating(false);
-    });
-  }, []);
+    }).catch(recoverFromGenerationFailure);
+  }, [recoverFromGenerationFailure]);
 
   const startJourney = () => {
     // Mobile, first time: offer fullscreen before opening the mode selector.
@@ -692,6 +742,16 @@ export function App() {
 
   const handleAddTube = () => sceneRef.current?.addEmptyTube();
 
+  /** Applies a wallet's equipped cosmetics to the scene: background + glass color (theme) and
+   *  the tube silhouette (shape). No-op during a boss fight (which uses its own theme). */
+  const applyCosmetics = (w: Wallet) => {
+    if (bossActive) return;
+    const bg = activeBg(w);
+    const tube = activeTube(w);
+    sceneRef.current?.setTheme(bg.deep, tube.rim);
+    sceneRef.current?.setTubeShape(shapeSpecFor(w.tubeShape));
+  };
+
   const handleBuyOrEquip = (item: ShopItem) => {
     let w = { ...wallet };
     if (item.price > 0 && !w.owned.includes(item.id)) {
@@ -699,29 +759,27 @@ export function App() {
       w = { ...w, coins: w.coins - item.price, owned: [...w.owned, item.id] };
     }
     if (item.kind === 'bg') w = { ...w, bg: item.id };
-    else w = { ...w, tube: item.id };
+    else if (item.kind === 'tube') w = { ...w, tube: item.id };
+    else w = { ...w, tubeShape: item.id };
     saveWallet(w);
     setWallet(w);
-    if (!bossActive) {
-      const bg = activeBg(w);
-      const tube = activeTube(w);
-      sceneRef.current?.setTheme(bg.deep, tube.rim);
-    }
+    applyCosmetics(w);
   };
 
   const handlePreview = (item: ShopItem) => {
     if (bossActive) return;
-    const bg = item.kind === 'bg' ? (item as BgTheme) : activeBg(wallet);
-    const tube = item.kind === 'tube' ? (item as TubeStyle) : activeTube(wallet);
-    sceneRef.current?.setTheme(bg.deep, tube.rim);
+    // Preview: apply just the previewed item on top of what's equipped (the other categories stay).
+    if (item.kind === 'shape') {
+      sceneRef.current?.setTubeShape(shapeSpecFor(item.id));
+    } else {
+      const bg = item.kind === 'bg' ? activeBg({ ...wallet, bg: item.id }) : activeBg(wallet);
+      const tube = item.kind === 'tube' ? activeTube({ ...wallet, tube: item.id }) : activeTube(wallet);
+      sceneRef.current?.setTheme(bg.deep, tube.rim);
+    }
   };
 
   const handleShopClose = () => {
-    if (!bossActive) {
-      const bg = activeBg(wallet);
-      const tube = activeTube(wallet);
-      sceneRef.current?.setTheme(bg.deep, tube.rim);
-    }
+    applyCosmetics(wallet); // revert any un-purchased preview back to what's equipped
     setShowShop(false);
   };
 
@@ -759,6 +817,15 @@ export function App() {
         className="pointer-events-none fixed inset-0 z-40 bg-black transition-opacity duration-300"
         style={{ opacity: transitioning ? 1 : 0 }}
       />
+
+      {/* ── TOAST (global: "no moves" in-game, generation-failure recovery on the menu) ── */}
+      <div
+        className={`pointer-events-none fixed bottom-[5.5rem] left-1/2 z-30 -translate-x-1/2 rounded-xl bg-slate-800/95 px-4 py-2 text-xs font-medium text-amber-300 shadow-lg backdrop-blur transition-all duration-300 ${
+          toast ? 'opacity-100' : 'opacity-0'
+        }`}
+      >
+        {toast?.msg ?? t.hud.semMovimentosDisponiveis}
+      </div>
 
       {/* ── MENU ─────────────────────────────────────────────────────── */}
       {screen === 'menu' && (
@@ -913,15 +980,6 @@ export function App() {
                 </div>
               )}
             </div>
-          </div>
-
-          {/* "No moves" toast */}
-          <div
-            className={`pointer-events-none fixed bottom-[5.5rem] left-1/2 z-20 -translate-x-1/2 rounded-xl bg-slate-800/95 px-4 py-2 text-xs font-medium text-amber-300 shadow-lg backdrop-blur transition-all duration-300 ${
-              toast ? 'opacity-100' : 'opacity-0'
-            }`}
-          >
-            {toast?.msg ?? t.hud.semMovimentosDisponiveis}
           </div>
 
           {/* Footer — Undo · Hint · +Tube · Restart · Skip (classic size, Restart back). */}

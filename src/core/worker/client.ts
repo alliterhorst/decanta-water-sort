@@ -3,6 +3,16 @@
  * boot, not one per call — creating a Worker has startup cost). When the environment lacks
  * Worker support (rare, but exotic sandboxes/webviews exist) it falls back to a direct
  * synchronous call — identical behavior, zero regression.
+ *
+ * Hardening (real field failure): on phones, an out-of-memory generation KILLS the worker
+ * process outright — no 'error' event is guaranteed, the pending promise just hangs forever
+ * and the phase-transition overlay stays black until the app is force-closed. Three layers
+ * fix that:
+ *  1. every call has a TIMEOUT — a hung/dead worker rejects instead of hanging;
+ *  2. timeout/error TERMINATES and RESPAWNS the worker (a dead worker never comes back on
+ *     its own — respawning is the only recovery);
+ *  3. public calls retry ONCE on a fresh worker before failing, so a transient death is
+ *     invisible to the player.
  */
 import { generateLevel as generateLevelSync, mulberry32 } from '../generator';
 import type { LevelConfig, GeneratedLevel } from '../generator';
@@ -21,20 +31,37 @@ export interface WorkerLike {
 interface PendingCall {
   resolve: (v: unknown) => void;
   reject: (e: unknown) => void;
+  timer: ReturnType<typeof setTimeout> | null;
 }
+
+/** Generation can legitimately take a few seconds on weak phones — generous ceilings; they
+ *  exist to catch a DEAD worker, not to race a slow one. */
+const GENERATE_TIMEOUT_MS = 25_000;
+const HINT_TIMEOUT_MS = 12_000;
+
+/** Transport-level failure (dead/hung worker) — worth retrying on a fresh worker. A kind:'error'
+ *  RESPONSE is not transient: the worker is alive and the computation failed deterministically. */
+class TransientWorkerError extends Error {}
 
 export class SolverClient {
   private worker: WorkerLike | null = null;
   private pending = new Map<number, PendingCall>();
   private nextId = 0;
+  /** Test-injected double: never respawned (the test owns its lifecycle). */
+  private readonly forced: boolean;
 
   constructor(opts?: { forceWorker?: WorkerLike }) {
+    this.forced = !!opts?.forceWorker;
     if (opts?.forceWorker) {
       this.worker = opts.forceWorker;
       this.wire();
       return;
     }
-    if (typeof Worker === 'undefined') return; // stays worker=null -> synchronous fallback
+    this.spawn();
+  }
+
+  private spawn(): void {
+    if (typeof Worker === 'undefined') { this.worker = null; return; } // synchronous fallback
     try {
       this.worker = new Worker(
         new URL('./solver.worker.ts', import.meta.url),
@@ -58,14 +85,31 @@ export class SolverClient {
     const p = this.pending.get(res.id);
     if (!p) return; // response for an id we no longer care about — safe to ignore
     this.pending.delete(res.id);
+    if (p.timer) clearTimeout(p.timer);
     if (res.kind === 'error') p.reject(new Error(res.message));
     else p.resolve(res.result);
   }
 
   private handleFatalError(ev: ErrorEvent): void {
-    const err = new Error(ev.message || 'Solver worker error');
-    for (const p of this.pending.values()) p.reject(err);
+    const err = new TransientWorkerError(ev.message || 'Solver worker error');
+    this.rejectAll(err);
+    this.respawn();
+  }
+
+  private rejectAll(err: Error): void {
+    for (const p of this.pending.values()) {
+      if (p.timer) clearTimeout(p.timer);
+      p.reject(err);
+    }
     this.pending.clear();
+  }
+
+  /** Kills the current worker (dead or hung) and boots a fresh one. */
+  private respawn(): void {
+    if (this.forced) return; // test double: the test controls the lifecycle
+    try { this.worker?.terminate(); } catch { /* already dead */ }
+    this.worker = null;
+    this.spawn();
   }
 
   private callSync<T>(req: WorkerRequestBody): T {
@@ -76,30 +120,55 @@ export class SolverClient {
     return nextHintSync(req.state) as unknown as T;
   }
 
-  private call<T>(req: WorkerRequestBody): Promise<T> {
+  private call<T>(req: WorkerRequestBody, timeoutMs: number): Promise<T> {
     const worker = this.worker;
     if (!worker) return Promise.resolve(this.callSync<T>(req));
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      worker.postMessage({ ...req, id } as WorkerRequest);
+      // A worker killed by the OS (OOM) emits NOTHING — the timeout is the only signal.
+      // On fire: drop the call, respawn the worker (it is unusable), and reject.
+      const timer = setTimeout(() => {
+        if (!this.pending.delete(id)) return; // already settled
+        this.respawn();
+        reject(new TransientWorkerError(`Solver worker timed out after ${timeoutMs}ms (${req.kind})`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
+      try {
+        worker.postMessage({ ...req, id } as WorkerRequest);
+      } catch (err) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(err);
+      }
     });
   }
 
+  /** call() + ONE retry on a fresh worker — a transient worker death (timeout/fatal error) is
+   *  invisible to the caller. Deterministic failures (kind:'error', terminate) do NOT retry. */
+  private async callWithRetry<T>(req: WorkerRequestBody, timeoutMs: number): Promise<T> {
+    try {
+      return await this.call<T>(req, timeoutMs);
+    } catch (err) {
+      if (!(err instanceof TransientWorkerError)) throw err;
+      return await this.call<T>(req, timeoutMs);
+    }
+  }
+
   generateLevel(cfg: LevelConfig, maxAttempts?: number, seed?: number): Promise<GeneratedLevel> {
-    return this.call<GeneratedLevel>({ kind: 'generateLevel', cfg, maxAttempts, seed });
+    return this.callWithRetry<GeneratedLevel>(
+      { kind: 'generateLevel', cfg, maxAttempts, seed }, GENERATE_TIMEOUT_MS,
+    );
   }
 
   nextHint(state: GameState): Promise<Move | null> {
-    return this.call<Move | null>({ kind: 'nextHint', state });
+    return this.callWithRetry<Move | null>({ kind: 'nextHint', state }, HINT_TIMEOUT_MS);
   }
 
   /** For testing/cleanup only — the `solverClient` singleton below lives for the whole app. */
   terminate(): void {
     this.worker?.terminate();
     this.worker = null;
-    for (const p of this.pending.values()) p.reject(new Error('SolverClient terminated'));
-    this.pending.clear();
+    this.rejectAll(new Error('SolverClient terminated'));
   }
 }
 

@@ -94,16 +94,33 @@ describe('SolverClient — message protocol (injected worker, tests correlation 
     await expect(pOk).resolves.toBeNull();
   });
 
-  it('a fatal worker error (onerror) rejects ALL pending promises — without this the overlay would hang forever', async () => {
-    const { fake, fail } = makeFakeWorker();
+  it('a fatal worker error (onerror) triggers ONE transparent retry — a success on the retried post resolves the original promise', async () => {
+    const { fake, posted, respond, fail } = makeFakeWorker();
     const client = new SolverClient({ forceWorker: fake });
 
     const p1 = client.generateLevel(CFG);
-    const p2 = client.nextHint(generateLevel(CFG).state);
-    fail('failed to import the worker script');
+    expect(posted).toHaveLength(1);
+    fail('worker died (OOM)');
+    // the transient failure re-posts the request (retry on the respawned worker)
+    await Promise.resolve(); // lets the catch in callWithRetry run
+    expect(posted).toHaveLength(2);
 
-    await expect(p1).rejects.toThrow('failed to import the worker script');
-    await expect(p2).rejects.toThrow('failed to import the worker script');
+    const lvl = generateLevel(CFG);
+    respond({ id: posted[1].id, kind: 'generateLevel', result: lvl });
+    await expect(p1).resolves.toEqual(lvl);
+  });
+
+  it('a SECOND fatal error (retry also died) rejects for real — without this the overlay would hang forever', async () => {
+    const { fake, posted, fail } = makeFakeWorker();
+    const client = new SolverClient({ forceWorker: fake });
+
+    const p1 = client.generateLevel(CFG);
+    fail('worker died (OOM)');
+    await Promise.resolve(); // retry re-posts
+    expect(posted).toHaveLength(2);
+    fail('worker died again');
+
+    await expect(p1).rejects.toThrow('worker died again');
   });
 
   it('terminate() rejects pending calls and releases the worker reference', async () => {

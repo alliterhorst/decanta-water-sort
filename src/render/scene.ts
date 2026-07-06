@@ -20,6 +20,7 @@ import { solverClient } from '../core/worker/client';
 import {
   buildTubeShape,
   bottlePoly,
+  bottleProfileLeft,
   polyToWorld,
   toWorld,
   clipH,
@@ -27,9 +28,8 @@ import {
   submergedArea,
   waterline,
   computeBandLevels,
-  NECK_RATIO,
-  SHOULDER_TOP,
-  SHOULDER_BOT,
+  CLASSIC_SHAPE,
+  type TubeShapeSpec,
   type Pose,
   type TubeShape,
   type V2,
@@ -129,6 +129,8 @@ export class Scene {
   private shape!: TubeShape;
   private outerLocal!: V2[];
   private interiorLocal!: V2[];
+  /** Equipped tube silhouette (shop cosmetic). Drives every glass/liquid/pour geometry. */
+  private shapeSpec: TubeShapeSpec = CLASSIC_SHAPE;
 
   // Icons for hidden units ("?") and WILDs ("✦") — one Container PER TUBE (hiddenC[i]),
   // a child of the global hiddenLayer (above liquid, below glassFront). Positions are updated
@@ -225,7 +227,30 @@ export class Scene {
       autoDensity: true,
       backgroundColor: BG_DEEP,
       preference: 'webgl',
-      preserveDrawingBuffer: true, // required for extract.canvas() and screenshot capture
+      // Dev/QA only: lets direct canvas drawImage/toDataURL captures work. It costs real GPU
+      // memory per frame on phones, and the documented QA path (renderer.extract.canvas)
+      // re-renders into its own texture — it does NOT need the drawing buffer preserved.
+      preserveDrawingBuffer: !import.meta.env.PROD,
+    });
+
+    // WebGL context loss: under memory/GPU pressure (exactly the high-phase scenario) the
+    // browser can drop the context — without handling, the canvas goes PERMANENTLY black and
+    // only closing/reopening the app recovers (real field report). preventDefault() opts into
+    // restoration; if the driver doesn't restore within 3s, ONE guarded reload recovers the
+    // game (the session is autosaved on every move, so the player resumes where they were).
+    canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      window.setTimeout(() => {
+        const gl = (this.app.renderer as unknown as { gl?: WebGLRenderingContext }).gl;
+        if (gl && !gl.isContextLost()) return; // restored in time — Pixi rebuilds GPU state
+        const KEY = 'decanta:ctxlost-reload';
+        let last = 0;
+        try { last = Number(sessionStorage.getItem(KEY) ?? 0); } catch { /* ignore */ }
+        if (Date.now() - last > 60_000) { // never reload-loop on a device that keeps dropping
+          try { sessionStorage.setItem(KEY, String(Date.now())); } catch { /* ignore */ }
+          window.location.reload();
+        }
+      }, 3000);
     });
     this.app.stage.addChild(this.shadowLayer, this.glassBack, this.liquid, this.hiddenLayer, this.glassFront, this.hintLayer, this.lift, this.streamLayer, this.capLayer);
     // Persistent Graphics for the per-frame layers (recreated in rebuild after the wipe)
@@ -513,9 +538,9 @@ export class Scene {
     this.tubeW = tubeW;
     this.tubeH = tubeH;
     this.centers = centers;
-    this.shape = buildTubeShape(tubeW, tubeH);
+    this.shape = buildTubeShape(tubeW, tubeH, this.shapeSpec);
     this.interiorLocal = this.shape.poly;
-    this.outerLocal = bottlePoly(tubeW, tubeH);
+    this.outerLocal = bottlePoly(tubeW, tubeH, this.shapeSpec);
     if (sizeChanged || this.backG.length !== this.state.tubes.length) this.rebuild();
     // reposition rest poses (preserves selection/lift)
     for (let i = 0; i < this.poses.length; i++) {
@@ -636,12 +661,11 @@ export class Scene {
 
   private buildGlassFront(): Container {
     const c = new Container();
-    const nw = this.tubeW * NECK_RATIO;
+    const spec = this.shapeSpec;
+    const nw = this.tubeW * spec.neckRatio;
     const nt = nw * 0.11;
     const top = -this.tubeH / 2;
-    const shoulderTopY = top + this.tubeH * SHOULDER_TOP;
-    const shoulderBotY = top + this.tubeH * SHOULDER_BOT;
-    const bodyBotY = this.tubeH / 2 - this.tubeW / 2; // center of the rounded bottom
+    const shoulderTopY = top + this.tubeH * spec.shoulderTop;
 
     // Thinner, more transparent outline
     const g = new Graphics();
@@ -656,30 +680,11 @@ export class Scene {
       .arcTo(nw / 2, top, nw / 2, top + nt, nt)
       .stroke({ color: 0xffffff, alpha: 0.45, width: Math.max(1.5, nw * 0.08), cap: 'round' });
 
-    // Left rim light — a second edge hugging the outline, top to bottom.
-    // Traces the inner left side of the bottle as a continuous polyline (neck→shoulder→body→bottom)
+    // Left rim light — a second edge hugging the outline (neck→shoulder→body→bottom). Derived
+    // from the actual silhouette profile, so it follows ANY equipped shape, not just the bottle.
     const ins = Math.max(1.2, this.tubeW * 0.022);   // inset ≈ wall thickness
     const rimW = Math.max(2.5, this.tubeW * 0.050); // left rim light
-    const rb = this.tubeW / 2;
-    const RSEGS = 8;
-    const smoothR = (t: number) => (1 - Math.cos(t * Math.PI)) / 2;
-    const rpts: { x: number; y: number }[] = [];
-    rpts.push({ x: -nw / 2 + ins, y: top + nt });                // top of the left neck
-    rpts.push({ x: -nw / 2 + ins, y: shoulderTopY });             // base of the left neck
-    for (let i = 1; i <= RSEGS; i++) {                            // left shoulder (S-curve)
-      const t = i / RSEGS;
-      rpts.push({
-        x: -(nw / 2 + (this.tubeW / 2 - nw / 2) * smoothR(t)) + ins,
-        y: shoulderTopY + (shoulderBotY - shoulderTopY) * t,
-      });
-    }
-    rpts.push({ x: -this.tubeW / 2 + ins, y: bodyBotY });         // base of the left body
-    const arcR = rb - ins;
-    for (let i = 0; i <= 10; i++) {                               // left half of the rounded bottom
-      const a = Math.PI - (Math.PI / 2) * (i / 10);              // 180° → 90°
-      rpts.push({ x: arcR * Math.cos(a), y: bodyBotY + arcR * Math.sin(a) });
-    }
-    // Left rim light: single, uniform edge, high transparency
+    const rpts = bottleProfileLeft(this.tubeW, this.tubeH, spec, ins);
     const rimLeft = new Graphics();
     rimLeft.moveTo(rpts[0].x, rpts[0].y);
     for (let i = 1; i < rpts.length; i++) rimLeft.lineTo(rpts[i].x, rpts[i].y);
@@ -694,9 +699,10 @@ export class Scene {
 
     // subtle highlight on the shoulder
     const shoulder = new Graphics();
+    const shoulderY = shoulderTopY + (this.tubeH * (spec.shoulderBot - spec.shoulderTop)) * 0.25;
     shoulder
-      .moveTo(-nw / 2, shoulderTopY + (this.tubeH * (SHOULDER_BOT - SHOULDER_TOP)) * 0.25)
-      .lineTo(nw / 2, shoulderTopY + (this.tubeH * (SHOULDER_BOT - SHOULDER_TOP)) * 0.25)
+      .moveTo(-nw / 2, shoulderY)
+      .lineTo(nw / 2, shoulderY)
       .stroke({ color: 0xffffff, alpha: 0.12, width: Math.max(1, this.tubeW * 0.06), cap: 'round' });
 
     c.addChild(g, lip, rimLeft, drops, shoulder);
@@ -1110,7 +1116,7 @@ export class Scene {
     const angMag = this.pourAngleFor(retainVol);
     const vw = this.app.screen.width;
     // outer corner of the neck mouth — the visual pivot point during the pour
-    const nwOuter = this.tubeW * NECK_RATIO;
+    const nwOuter = this.tubeW * this.shapeSpec.neckRatio;
     const ntOuter = nwOuter * 0.11;
     const halfNeckCorner = nwOuter / 2 - ntOuter;
     // the bottle body (nearly horizontal on strong pours) must not go off-screen:
@@ -1376,7 +1382,7 @@ export class Scene {
   private drawStream(from: number, to: number, color: number): void {
     const dir = this.centers[to].x >= this.centers[from].x ? 1 : -1;
     const p = this.poses[from];
-    const nwOuter = this.tubeW * NECK_RATIO;
+    const nwOuter = this.tubeW * this.shapeSpec.neckRatio;
     const lip = toWorld({ x: dir * (nwOuter / 2 - nwOuter * 0.11), y: -this.tubeH / 2 }, p);
     // target = current liquid SURFACE at the destination (bottom if empty; rises as it fills).
     const destInterior = polyToWorld(this.interiorLocal, this.poses[to]);
@@ -1418,7 +1424,7 @@ export class Scene {
       if (this.busy.has(i)) continue;
 
       const pose = this.poses[i];
-      const nw = this.tubeW * NECK_RATIO;
+      const nw = this.tubeW * this.shapeSpec.neckRatio;
 
       // Filter indicator: colored dot floating above the neck
       const filterColor = this.state.filters?.[i];
@@ -1748,6 +1754,19 @@ export class Scene {
     this.app.renderer.background.color = bgDeep;
     this.glassColor = tubeRim;
     this.rebuild();
+  }
+
+  /** Applies the equipped tube SILHOUETTE (shop cosmetic). Recomputes the shape-derived
+   *  geometry at the current size and rebuilds the glass — the liquid mechanic is unaffected
+   *  (it levels by area over whatever interior polygon this produces). */
+  setTubeShape(spec: TubeShapeSpec): void {
+    this.shapeSpec = spec;
+    if (this.tubeW > 0) {
+      this.shape = buildTubeShape(this.tubeW, this.tubeH, spec);
+      this.interiorLocal = this.shape.poly;
+      this.outerLocal = bottlePoly(this.tubeW, this.tubeH, spec);
+      this.rebuild();
+    }
   }
 
   /** Manual override of graphics quality. 'auto' re-enables automatic detection. */

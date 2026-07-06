@@ -1,11 +1,14 @@
-import { useState } from 'react';
-import { BG_THEMES, TUBE_STYLES, type Wallet, type ShopItem, type BgTheme, type TubeStyle } from '../game/economy';
+import { useId, useState } from 'react';
+import { BG_THEMES, TUBE_STYLES, TUBE_SHAPES, type Wallet, type ShopItem, type BgTheme, type TubeStyle, type TubeShapeItem } from '../game/economy';
+import { TUBE_SHAPE_SPECS, CLASSIC_SHAPE, tubeSvgPath, type TubeShapeSpec } from '../render/geometry';
 import { CategoryPicker } from './CategoryPicker';
 import { useT } from '../i18n/context';
 import type { Dictionary } from '../i18n/types';
 
 const bgName = (t: Dictionary, id: string) => t.economy.bg[id as keyof typeof t.economy.bg];
 const tubeName = (t: Dictionary, id: string) => t.economy.tube[id as keyof typeof t.economy.tube];
+const shapeName = (t: Dictionary, id: string) => t.economy.shape[id as keyof typeof t.economy.shape];
+const specOf = (id: string): TubeShapeSpec => TUBE_SHAPE_SPECS[id] ?? CLASSIC_SHAPE;
 
 interface Props {
   wallet: Wallet;
@@ -46,10 +49,14 @@ export function ShopModal({ wallet, onBuyOrEquip, onPreview, onClose }: Props) {
   // category in preview, show it; otherwise show the equipped one.
   const activeBgId = previewing?.kind === 'bg' ? previewing.id : wallet.bg;
   const activeTubeId = previewing?.kind === 'tube' ? previewing.id : wallet.tube;
+  const activeShapeId = previewing?.kind === 'shape' ? previewing.id : wallet.tubeShape;
+  // Shape swatches are tinted with the color the player has equipped (or is previewing), so the
+  // "shape" preview reads as the same glass they'll actually see in-game.
+  const activeTubeRim = (TUBE_STYLES.find(ts => ts.id === activeTubeId) ?? TUBE_STYLES[0]).rim;
 
   // Buy footer INSIDE each category's child modal — shows "Buy" while the paid item is in
   // preview, so the action is reachable without having to close the modal to find it.
-  const buyFooter = (kind: 'bg' | 'tube') => {
+  const buyFooter = (kind: ShopItem['kind']) => {
     if (!previewing || previewing.kind !== kind) return null;
     return (
       <button
@@ -120,8 +127,8 @@ export function ShopModal({ wallet, onBuyOrEquip, onPreview, onClose }: Props) {
 
           <div className="mb-3">
             <CategoryPicker<TubeStyle>
-              label={t.shop.estilosDeTubo}
-              modalTitle={t.shop.estilosDeTubo}
+              label={t.shop.corDoTubo}
+              modalTitle={t.shop.corDoTubo}
               items={TUBE_STYLES}
               activeId={activeTubeId}
               onSelect={id => {
@@ -150,6 +157,41 @@ export function ShopModal({ wallet, onBuyOrEquip, onPreview, onClose }: Props) {
                 );
               }}
               footer={buyFooter('tube')}
+            />
+          </div>
+
+          <div className="mb-3">
+            <CategoryPicker<TubeShapeItem>
+              label={t.shop.formatoDoTubo}
+              modalTitle={t.shop.formatoDoTubo}
+              items={TUBE_SHAPES}
+              activeId={activeShapeId}
+              onSelect={id => {
+                const item = TUBE_SHAPES.find(s => s.id === id);
+                if (item) handleItemClick(item);
+              }}
+              collapsedPreview={active => active && <ShapeSwatch spec={specOf(active.id)} rim={activeTubeRim} size="sm" />}
+              activeLabel={active => (active ? shapeName(t, active.id) : '—')}
+              bigPreview={active => active && <ShapeSwatch spec={specOf(active.id)} rim={activeTubeRim} size="lg" />}
+              renderRow={(sh) => {
+                const isOwned = owned(sh.id);
+                const isEquipped = wallet.tubeShape === sh.id;
+                const isPreviewing = previewing?.id === sh.id;
+                return (
+                  <ItemRow
+                    key={sh.id}
+                    name={shapeName(t, sh.id)}
+                    price={sh.price}
+                    isOwned={isOwned}
+                    isEquipped={isEquipped}
+                    isPreviewing={isPreviewing}
+                    canAfford={wallet.coins >= sh.price || isOwned}
+                    preview={<ShapeSwatch spec={specOf(sh.id)} rim={activeTubeRim} size="sm" />}
+                    onClick={() => handleItemClick(sh)}
+                  />
+                );
+              }}
+              footer={buyFooter('shape')}
             />
           </div>
         </div>
@@ -269,4 +311,36 @@ function TubeSwatch({ rim, size = 'sm' }: { rim: number; size?: 'sm' | 'lg' }) {
       style={{ borderColor: toHex(rim), background: toHex(rim) + '18' }}
     />
   );
+}
+
+/** Draws the actual tube SILHOUETTE (from the geometry spec) with a bit of liquid inside, so the
+ *  shape reads at a glance in the shop. Tinted with the equipped tube color (rim). */
+function ShapeSwatch({ spec, rim, size = 'sm' }: { spec: TubeShapeSpec; rim: number; size?: 'sm' | 'lg' }) {
+  const toHex = (n: number) => '#' + n.toString(16).padStart(6, '0');
+  const clipId = useId();
+  const VW = 44, VH = 108;
+  const d = tubeSvgPath(spec, VW, VH);
+  const glass = toHex(rim);
+  const liquidTop = VH * 0.52; // fill ~48% from the bottom
+  const svg = (
+    <svg viewBox={`0 0 ${VW} ${VH}`} className={size === 'lg' ? 'h-24' : 'h-10'} fill="none" preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <clipPath id={clipId}><path d={d} /></clipPath>
+      </defs>
+      {/* faint glass body */}
+      <path d={d} fill={glass + '14'} />
+      {/* liquid, clipped to the silhouette */}
+      <rect x="0" y={liquidTop} width={VW} height={VH - liquidTop} fill={glass + '55'} clipPath={`url(#${clipId})`} />
+      {/* outline */}
+      <path d={d} fill="none" stroke={glass} strokeWidth={size === 'lg' ? 2 : 3} strokeLinejoin="round" strokeOpacity={0.9} />
+    </svg>
+  );
+  if (size === 'lg') {
+    return (
+      <div className="flex h-28 w-full items-center justify-center rounded-xl bg-slate-950/40 ring-1 ring-white/10">
+        {svg}
+      </div>
+    );
+  }
+  return <span className="flex h-10 w-10 items-center justify-center">{svg}</span>;
 }

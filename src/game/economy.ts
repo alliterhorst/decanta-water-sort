@@ -9,7 +9,7 @@
  * Everything persists in localStorage (with try/catch — Safari private mode may throw).
  */
 
-export type ItemKind = 'bg' | 'tube';
+export type ItemKind = 'bg' | 'tube' | 'shape';
 
 export interface BgTheme {
   id: string;
@@ -34,7 +34,16 @@ export interface TubeStyle {
   tint: number;
 }
 
-export type ShopItem = BgTheme | TubeStyle;
+/** Tube SHAPE cosmetic — the silhouette (bottle, test tube, flask…). The geometry spec lives
+ *  in render/geometry.ts (TUBE_SHAPE_SPECS), keyed by this same id; the shop only holds price. */
+export interface TubeShapeItem {
+  id: string;
+  // name is UI text, translated via t.economy.shape[id] in i18n/locales/*.ts.
+  kind: 'shape';
+  price: number;
+}
+
+export type ShopItem = BgTheme | TubeStyle | TubeShapeItem;
 
 /** Backgrounds. The first one is free and comes equipped. */
 export const BG_THEMES: BgTheme[] = [
@@ -46,7 +55,7 @@ export const BG_THEMES: BgTheme[] = [
   { id: 'carvao', kind: 'bg', price: 120, top: 0x252b34, mid: 0x171b23, deep: 0x0c0e13 },
 ];
 
-/** Tube styles. The first one is free and comes equipped. */
+/** Tube COLORS (glass tint). The first one is free and comes equipped. */
 export const TUBE_STYLES: TubeStyle[] = [
   { id: 'cristal', kind: 'tube', price: 0, rim: 0xe3edff, tint: 0xffffff },
   { id: 'ambar', kind: 'tube', price: 70, rim: 0xffd98a, tint: 0xfff0cc },
@@ -55,19 +64,32 @@ export const TUBE_STYLES: TubeStyle[] = [
   { id: 'ouro', kind: 'tube', price: 150, rim: 0xffcf66, tint: 0xfff2c8 },
 ];
 
+/** Tube SHAPES (silhouette). ids match TUBE_SHAPE_SPECS in render/geometry.ts. First is free. */
+export const TUBE_SHAPES: TubeShapeItem[] = [
+  { id: 'classica', kind: 'shape', price: 0 },
+  { id: 'proveta', kind: 'shape', price: 90 },
+  { id: 'farmacia', kind: 'shape', price: 110 },
+  { id: 'erlenmeyer', kind: 'shape', price: 130 },
+  { id: 'balao', kind: 'shape', price: 150 },
+];
+
 export interface Wallet {
   coins: number;
   /** IDs of purchased items (free ones count as always owned). */
   owned: string[];
   /** Equipped background cosmetic. */
   bg: string;
-  /** Equipped tube style. */
+  /** Equipped tube color. */
   tube: string;
+  /** Equipped tube shape (silhouette). */
+  tubeShape: string;
 }
 
 const KEY = 'decanta:wallet';
 const WALLET_VERSION = 1;
-const DEFAULTS: Wallet = { coins: 0, owned: ['noite', 'cristal'], bg: 'noite', tube: 'cristal' };
+/** Free ids that are ALWAYS owned (even for wallets saved before a category existed). */
+const FREE_IDS = ['noite', 'cristal', 'classica'];
+const DEFAULTS: Wallet = { coins: 0, owned: [...FREE_IDS], bg: 'noite', tube: 'cristal', tubeShape: 'classica' };
 
 export function loadWallet(): Wallet {
   try {
@@ -83,9 +105,11 @@ export function loadWallet(): Wallet {
         : [...DEFAULTS.owned],
       bg: typeof data.bg === 'string' ? data.bg : DEFAULTS.bg,
       tube: typeof data.tube === 'string' ? data.tube : DEFAULTS.tube,
+      // Wallets saved before tube shapes existed fall back to the free classic shape.
+      tubeShape: typeof data.tubeShape === 'string' ? data.tubeShape : DEFAULTS.tubeShape,
     };
     // Free IDs always present (even if the old schema didn't have them)
-    for (const free of ['noite', 'cristal']) if (!w.owned.includes(free)) w.owned.push(free);
+    for (const free of FREE_IDS) if (!w.owned.includes(free)) w.owned.push(free);
     return w;
   } catch {
     return { ...DEFAULTS, owned: [...DEFAULTS.owned] };
@@ -117,7 +141,7 @@ export function rewardFor(opts: {
   return Math.max(floor, base + bonus - Math.max(0, penalty));
 }
 
-const ALL = [...BG_THEMES, ...TUBE_STYLES] as ShopItem[];
+const ALL = [...BG_THEMES, ...TUBE_STYLES, ...TUBE_SHAPES] as ShopItem[];
 
 export function itemById(id: string): ShopItem | undefined {
   return ALL.find((it) => it.id === id);
@@ -129,4 +153,8 @@ export function activeBg(w: Wallet): BgTheme {
 
 export function activeTube(w: Wallet): TubeStyle {
   return TUBE_STYLES.find((t) => t.id === w.tube) ?? TUBE_STYLES[0];
+}
+
+export function activeTubeShape(w: Wallet): TubeShapeItem {
+  return TUBE_SHAPES.find((t) => t.id === w.tubeShape) ?? TUBE_SHAPES[0];
 }

@@ -59,12 +59,14 @@ export const es: Dictionary = {
     chefaoDerrotado: '⚔ ¡Jefe Derrotado!',
     preparandoBatalha: 'Preparando batalla…',
     preparandoFase: 'Preparando nivel…',
+    erroPreparandoFase: 'No se pudo preparar el nivel. Inténtalo de nuevo.',
   },
 
   shop: {
     title: 'Tienda',
     fundos: 'Fondos',
-    estilosDeTubo: 'Estilos de tubo',
+    corDoTubo: 'Color del tubo',
+    formatoDoTubo: 'Forma del tubo',
     emUso: 'En uso',
     equipar: 'Equipar',
     gratis: 'Gratis',
@@ -190,6 +192,13 @@ export const es: Dictionary = {
       esmeralda: 'Esmeralda',
       rose: 'Rosé',
       ouro: 'Oro viejo',
+    },
+    shape: {
+      classica: 'Clásica',
+      proveta: 'Probeta',
+      farmacia: 'Boticario',
+      erlenmeyer: 'Erlenmeyer',
+      balao: 'Matraz',
     },
   },
 

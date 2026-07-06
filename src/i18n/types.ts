@@ -67,12 +67,14 @@ export interface Dictionary {
     chefaoDerrotado: string;
     preparandoBatalha: string;
     preparandoFase: string;
+    erroPreparandoFase: string;
   };
 
   shop: {
     title: string;
     fundos: string;
-    estilosDeTubo: string;
+    corDoTubo: string;
+    formatoDoTubo: string;
     emUso: string;
     equipar: string;
     gratis: string;
@@ -159,6 +161,13 @@ export interface Dictionary {
       esmeralda: string;
       rose: string;
       ouro: string;
+    };
+    shape: {
+      classica: string;
+      proveta: string;
+      farmacia: string;
+      erlenmeyer: string;
+      balao: string;
     };
   };
 

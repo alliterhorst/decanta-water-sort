@@ -57,80 +57,137 @@ export function roundedTubePoly(w: number, h: number, segs = 28): V2[] {
   return poly;
 }
 
-// ---- Stylized bottle (shoulder + neck + headspace) ----
-
-/** Fraction of the body used as the neck width (exterior). */
-export const NECK_RATIO = 0.46;
-/** Fraction of the height (from the top) where the neck ends and the shoulder begins. */
-export const SHOULDER_TOP = 0.26;
-/** Fraction of the height (from the top) where the shoulder ends and the body begins. */
-export const SHOULDER_BOT = 0.40;
+// ---- Configurable tube shapes (neck + shoulder + body + bottom) ----
 
 /**
- * Stylized bottle polygon: narrow neck + S-curve shoulder + wide body + rounded bottom.
- * Centered at (0,0), y down. `neckRatio` = neck width / body width.
+ * Parameters that define a tube SILHOUETTE. The liquid levels by AREA over the interior
+ * polygon (rotation preserves area), so EVERY shape works with the exact same mechanic —
+ * only the outline changes. The shop sells these as "tube shapes" (see economy.ts).
  */
-export function bottlePoly(w: number, h: number, neckRatio = NECK_RATIO, segs = 28): V2[] {
-  const nw = w * neckRatio;          // neck width
-  const nt = nw * 0.11;              // mouth corner radius
-  const rb = w / 2;                  // bottom radius (semicircle)
+export interface TubeShapeSpec {
+  /** Neck width / body width (the mouth opening). */
+  neckRatio: number;
+  /** Fraction of the height (from the top) where the neck ends and the shoulder begins. */
+  shoulderTop: number;
+  /** Fraction of the height (from the top) where the shoulder ends and the body begins. */
+  shoulderBot: number;
+  /** Body half-width just below the shoulder, relative to the full width. 1 = straight body;
+   *  < 1 = the body WIDENS toward the base (conical, e.g. an Erlenmeyer flask). */
+  bodyTopRatio: number;
+  /** Bottom roundness: 1 = full semicircle; < 1 = flatter base (semi-ellipse). */
+  bottomRound: number;
+}
+
+/** Classic-bottle constants (kept as the free default shape). */
+export const NECK_RATIO = 0.46;
+export const SHOULDER_TOP = 0.26;
+export const SHOULDER_BOT = 0.40;
+
+/** The default free shape — the classic bottle the game shipped with. */
+export const CLASSIC_SHAPE: TubeShapeSpec = {
+  neckRatio: NECK_RATIO, shoulderTop: SHOULDER_TOP, shoulderBot: SHOULDER_BOT,
+  bodyTopRatio: 1, bottomRound: 1,
+};
+
+/** Catalog of tube silhouettes (id → spec). The shop sells these by id (economy.ts TUBE_SHAPES). */
+export const TUBE_SHAPE_SPECS: Record<string, TubeShapeSpec> = {
+  classica:   CLASSIC_SHAPE,
+  // straight cylinder, wide mouth, deep U bottom — a lab test tube
+  proveta:    { neckRatio: 0.82, shoulderTop: 0.05, shoulderBot: 0.12, bodyTopRatio: 1.0,  bottomRound: 1.0 },
+  // conical Erlenmeyer: narrow top, widens to the base, flatter bottom
+  erlenmeyer: { neckRatio: 0.40, shoulderTop: 0.12, shoulderBot: 0.23, bodyTopRatio: 0.42, bottomRound: 0.5 },
+  // long slim neck + bulbous body — a distillation flask
+  balao:      { neckRatio: 0.28, shoulderTop: 0.40, shoulderBot: 0.56, bodyTopRatio: 0.80, bottomRound: 1.0 },
+  // apothecary jar: short shoulder, near-straight body, flat base
+  farmacia:   { neckRatio: 0.58, shoulderTop: 0.10, shoulderBot: 0.20, bodyTopRatio: 0.96, bottomRound: 0.34 },
+};
+
+/** Elliptic arc into `poly` (rx = ry gives a circular arc; rx ≠ ry the flatter bottom). */
+function ellArc(poly: V2[], cx: number, cy: number, rx: number, ry: number, a0: number, a1: number, n: number): void {
+  for (let i = 0; i <= n; i++) {
+    const a = a0 + ((a1 - a0) * i) / n;
+    poly.push({ x: cx + rx * Math.cos(a), y: cy + ry * Math.sin(a) });
+  }
+}
+
+/**
+ * Silhouette polygon for a tube, centered at (0,0), y down, width `w`, height `h`:
+ * neck → S-curve shoulder → (optionally tapered) body → rounded/flat bottom.
+ */
+export function bottlePoly(w: number, h: number, spec: TubeShapeSpec = CLASSIC_SHAPE, segs = 28): V2[] {
+  const nw = w * spec.neckRatio;         // neck width
+  const nt = nw * 0.11;                   // mouth corner radius
+  const rb = (w / 2) * spec.bottomRound;  // bottom vertical radius (semi-ellipse height)
   const top = -h / 2;
-  const shoulderTopY = top + h * SHOULDER_TOP;  // where the neck meets the shoulder
-  const shoulderBotY = top + h * SHOULDER_BOT;  // where the shoulder meets the body
-  const bodyBotY = h / 2 - rb;       // center of the bottom arc
+  const shoulderTopY = top + h * spec.shoulderTop;
+  const shoulderBotY = top + h * spec.shoulderBot;
+  const bodyHalf = (w / 2) * spec.bodyTopRatio; // half-width just below the shoulder
+  const bodyBotY = h / 2 - rb;            // where the body meets the bottom arc
   const SHOULDER_SEGS = 10;
   const smooth = (t: number) => (1 - Math.cos(t * Math.PI)) / 2; // S-curve 0→1
 
   const poly: V2[] = [];
-  const arc = (cx: number, cy: number, r: number, a0: number, a1: number, n: number) => {
-    for (let i = 0; i <= n; i++) {
-      const a = a0 + ((a1 - a0) * i) / n;
-      poly.push({ x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
-    }
-  };
-
   // Clockwise in y-down:
-  // top-left neck corner (180°→270°)
-  arc(-nw / 2 + nt, top + nt, nt, Math.PI, Math.PI * 1.5, 5);
-  // top-right neck corner (270°→360°)
-  arc(nw / 2 - nt, top + nt, nt, Math.PI * 1.5, Math.PI * 2, 5);
-  // right side of the neck (vertical, going down)
-  poly.push({ x: nw / 2, y: shoulderTopY });
-  // right shoulder — S-curve from neck to body
-  for (let i = 1; i <= SHOULDER_SEGS; i++) {
+  ellArc(poly, -nw / 2 + nt, top + nt, nt, nt, Math.PI, Math.PI * 1.5, 5);   // top-left neck corner
+  ellArc(poly, nw / 2 - nt, top + nt, nt, nt, Math.PI * 1.5, Math.PI * 2, 5); // top-right neck corner
+  poly.push({ x: nw / 2, y: shoulderTopY });                                  // right neck side down
+  for (let i = 1; i <= SHOULDER_SEGS; i++) {                                   // right shoulder S-curve
     const t = i / SHOULDER_SEGS;
-    poly.push({ x: nw / 2 + (w / 2 - nw / 2) * smooth(t), y: shoulderTopY + (shoulderBotY - shoulderTopY) * t });
+    poly.push({ x: nw / 2 + (bodyHalf - nw / 2) * smooth(t), y: shoulderTopY + (shoulderBotY - shoulderTopY) * t });
   }
-  // right side of the body (vertical, going down)
-  poly.push({ x: w / 2, y: bodyBotY });
-  // rounded bottom (right→left along the bottom)
-  arc(0, bodyBotY, rb, 0, Math.PI, segs);
-  // left side of the body (vertical, going up)
-  poly.push({ x: -w / 2, y: shoulderBotY });
-  // left shoulder — S-curve from body to neck (mirrored)
-  for (let i = 1; i <= SHOULDER_SEGS; i++) {
+  poly.push({ x: w / 2, y: bodyBotY });                                        // right body → base (linear taper)
+  ellArc(poly, 0, bodyBotY, w / 2, rb, 0, Math.PI, segs);                      // bottom (right → left)
+  poly.push({ x: -bodyHalf, y: shoulderBotY });                               // left body base → top
+  for (let i = 1; i <= SHOULDER_SEGS; i++) {                                   // left shoulder S-curve (mirrored)
     const t = i / SHOULDER_SEGS;
-    poly.push({ x: -(nw / 2 + (w / 2 - nw / 2) * smooth(1 - t)), y: shoulderBotY - (shoulderBotY - shoulderTopY) * t });
+    poly.push({ x: -(nw / 2 + (bodyHalf - nw / 2) * smooth(1 - t)), y: shoulderBotY - (shoulderBotY - shoulderTopY) * t });
   }
-  // left side of the neck closes back to the start of the top-left arc
-
   return poly;
 }
 
 /**
- * INNER bottle polygon (where the liquid lives), centered at (0,0).
- * OUTER dimensions → subtracts ~6% wall thickness from each side.
+ * Left inner profile (top→bottom), inset by `ins` — used for the glass rim-light highlight so
+ * it hugs ANY shape, not just the classic bottle.
  */
-export function buildTubeShape(tubeW: number, tubeH: number, segs = 28): TubeShape {
+export function bottleProfileLeft(w: number, h: number, spec: TubeShapeSpec, ins: number, segs = 10): V2[] {
+  const nw = w * spec.neckRatio;
+  const nt = nw * 0.11;
+  const rb = (w / 2) * spec.bottomRound;
+  const top = -h / 2;
+  const shoulderTopY = top + h * spec.shoulderTop;
+  const shoulderBotY = top + h * spec.shoulderBot;
+  const bodyHalf = (w / 2) * spec.bodyTopRatio;
+  const bodyBotY = h / 2 - rb;
+  const smooth = (t: number) => (1 - Math.cos(t * Math.PI)) / 2;
+  const pts: V2[] = [];
+  pts.push({ x: -nw / 2 + ins, y: top + nt });          // top of the left neck
+  pts.push({ x: -nw / 2 + ins, y: shoulderTopY });       // base of the left neck
+  for (let i = 1; i <= segs; i++) {                       // left shoulder S-curve
+    const t = i / segs;
+    pts.push({ x: -(nw / 2 + (bodyHalf - nw / 2) * smooth(t)) + ins, y: shoulderTopY + (shoulderBotY - shoulderTopY) * t });
+  }
+  pts.push({ x: -w / 2 + ins, y: bodyBotY });            // base of the left body
+  for (let i = 1; i <= 10; i++) {                          // left quarter of the bottom ellipse (180°→90°)
+    const a = Math.PI - (Math.PI / 2) * (i / 10);
+    pts.push({ x: (w / 2 - ins) * Math.cos(a), y: bodyBotY + (rb - ins) * Math.sin(a) });
+  }
+  return pts;
+}
+
+/**
+ * INNER tube polygon (where the liquid lives), centered at (0,0).
+ * OUTER dimensions → subtracts wall thickness from each side.
+ */
+export function buildTubeShape(tubeW: number, tubeH: number, spec: TubeShapeSpec = CLASSIC_SHAPE, segs = 28): TubeShape {
   const t = tubeW * 0.02; // reduced inset: liquid reaches close to the visual edge
   const wi = tubeW - 2 * t;
   const hInt = tubeH - t;
-  const nwOuter = tubeW * NECK_RATIO;
+  const nwOuter = tubeW * spec.neckRatio;
   const neckWi = nwOuter - 2 * t;
   const neckRatioInner = neckWi / wi;
   const neckRt = neckWi * 0.11;
   return {
-    poly: bottlePoly(wi, hInt, neckRatioInner, segs),
+    poly: bottlePoly(wi, hInt, { ...spec, neckRatio: neckRatioInner }, segs),
     wi,
     hInt,
     rb: wi / 2,
@@ -138,6 +195,16 @@ export function buildTubeShape(tubeW: number, tubeH: number, segs = 28): TubeSha
     neckWi,
     neckRt,
   };
+}
+
+/** SVG path string of a silhouette, normalized into a [0..vw]×[0..vh] viewBox (for shop swatches). */
+export function tubeSvgPath(spec: TubeShapeSpec, vw: number, vh: number, pad = 2): string {
+  const w = vw - 2 * pad;
+  const h = vh - 2 * pad;
+  const pts = bottlePoly(w, h, spec, 22);
+  return pts
+    .map((p, i) => `${i === 0 ? 'M' : 'L'}${(p.x + vw / 2).toFixed(2)},${(p.y + vh / 2).toFixed(2)}`)
+    .join(' ') + ' Z';
 }
 
 /** Transforms a local point into world space by applying the pose (rotation around the center). */

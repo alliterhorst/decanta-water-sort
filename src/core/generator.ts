@@ -6,7 +6,7 @@
  * merging is irreversible and can yield impossible levels — hence we validate.)
  */
 import { isWin } from './engine';
-import { solve } from './solver';
+import { solveLength } from './solver';
 import { WILD } from './types';
 import type { GameState } from './types';
 
@@ -193,11 +193,14 @@ export function generateLevel(
       !(lockArr[i] ?? 0) &&
       t.length === cfg.capacity && t[0] >= 0 && t.every(c => c === t[0])
     )) continue;
-    const r = solve(state);
-    if (!r.solved || !r.moves) continue;
+    // Validation-only solve: we never use the move PATH here, just solvability + length —
+    // solveLength keeps the search's peak memory ~2 orders of magnitude below solve()
+    // (numeric visited set, no parent map), which is what blew up the worker on phones.
+    const r = solveLength(state);
+    if (!r.solved) continue;
 
-    const lvl: GeneratedLevel = { state, optimalMoves: r.moves.length };
-    if (r.moves.length >= minMoves) return lvl;
+    const lvl: GeneratedLevel = { state, optimalMoves: r.length };
+    if (r.length >= minMoves) return lvl;
     if (!best || lvl.optimalMoves > best.optimalMoves) best = lvl; // keep the best "easy" one
   }
 

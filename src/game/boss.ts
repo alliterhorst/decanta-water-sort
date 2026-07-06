@@ -60,10 +60,14 @@ export function bossForTier(tier: number): BossData | undefined {
 
 /**
  * Returns the boss that should appear AFTER completing this phase.
- * A boss appears when completing the last phase of each tier (phase 5, 11, 17...).
+ * A boss appears when completing the last phase of each tier (phase 5, 11, 17, 23...) —
+ * FOREVER: past the three introductions, the roster cycles (tier % 3), so the fights
+ * keep coming every 6 phases and rotate between the three bosses without ever
+ * repeating back-to-back. (Before this, bossForTier(3+) returned undefined and no boss
+ * ever appeared again after phase 17 — a real player-reported loss.)
  */
 export function bossAfterPhase(phase: number): BossData | undefined {
   if ((phase + 1) % 6 !== 0) return undefined;
   const tier = Math.floor((phase + 1) / 6) - 1;
-  return bossForTier(tier);
+  return bossForTier(tier % BOSSES.length);
 }
