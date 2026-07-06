@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
     <meta name="theme-color" content="#0b1322" />
     <title>Decanta: Water Sort</title>
+    <!-- Tab favicon. %BASE_URL% is swapped by Vite for the deploy base (/ locally, /decanta-water-sort/ on Pages). -->
+    <link rel="icon" type="image/svg+xml" href="%BASE_URL%icons/icon.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="%BASE_URL%icons/icon-192.png" />
     <!-- iOS doesn't read the manifest for "add to home screen" — it needs these separate tags. -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Decanta" />
-    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="%BASE_URL%icons/icon-192.png" />
   </head>
   <body>
     <div id="root"></div>
