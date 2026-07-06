@@ -1,0 +1,9 @@
+# Normalize line endings to LF in the repository (avoids CRLF/LF churn across platforms).
+* text=auto eol=lf
+
+# Binary assets — never normalize.
+*.png binary
+*.svg binary
+*.mp3 binary
+*.ogg binary
+*.ico binary

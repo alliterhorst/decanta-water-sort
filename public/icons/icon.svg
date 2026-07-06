@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0e1726"/>
+  <!-- três tubos com líquidos -->
+  <g stroke="#dce8ff" stroke-width="10" fill="none" opacity="0.85">
+    <rect x="120" y="120" width="80" height="260" rx="40"/>
+    <rect x="216" y="120" width="80" height="260" rx="40"/>
+    <rect x="312" y="120" width="80" height="260" rx="40"/>
+  </g>
+  <g>
+    <rect x="125" y="250" width="70" height="125" rx="35" fill="#e6394a"/>
+    <rect x="125" y="250" width="70" height="60" fill="#ffd60a"/>
+    <rect x="221" y="200" width="70" height="175" rx="35" fill="#3a86ff"/>
+    <rect x="221" y="200" width="70" height="60" fill="#35c759"/>
+    <rect x="317" y="300" width="70" height="75" rx="35" fill="#9b5de5"/>
+  </g>
+</svg>
