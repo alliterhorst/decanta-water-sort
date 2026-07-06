@@ -4,6 +4,8 @@ A polished water-sort puzzle game for the browser. Pour colored liquids between
 glass tubes until every tube holds a single color. Built as an installable PWA,
 mobile-first, and fully playable on desktop.
 
+**▶ Play online: https://alliterhorst.github.io/decanta-water-sort/**
+
 ## Features
 
 - **Journey mode** with three difficulty presets (Zen, Balanced, Extreme) and a

@@ -33,8 +33,13 @@ export type SfxStyle = string;
 
 export const DEFAULT_SFX_STYLE: SfxStyle = SFX_OPTIONS[0].id;
 
+// Prefix runtime asset paths with Vite's base URL so they resolve when the app is served under a
+// sub-path (e.g. GitHub Pages at /decanta-water-sort/). import.meta.env.BASE_URL ends with '/', and
+// the manifest paths start with '/audio/…', so we strip the leading slash before concatenating.
+const asset = (p: string): string => import.meta.env.BASE_URL + p.replace(/^\//, '');
+
 const SFX_FILES: Record<string, string> = Object.fromEntries(
-  SFX_OPTIONS.map(o => [o.id, o.file]),
+  SFX_OPTIONS.map(o => [o.id, asset(o.file)]),
 );
 
 // ── Music manifest (public-domain recordings — see licenseNotes) ──
@@ -100,12 +105,12 @@ export const MUSIC_TRACKS: MusicTrackInfo[] = [
  *  second level onward. */
 export const ONBOARDING_TRACK: MusicTrack = 'clair-de-lune-wright-brass';
 
-/** Reserved tracks (menu/boss) + manifest → id → file map. */
+/** Reserved tracks (menu/boss) + manifest → id → file map (base-prefixed via asset()). */
 const MUSIC_FILES: Record<string, string> = {
-  menu: '/audio/bgm_menu.mp3',
-  boss: '/audio/bgm_boss.mp3',
+  menu: asset('/audio/bgm_menu.mp3'),
+  boss: asset('/audio/bgm_boss.mp3'),
 };
-for (const t of MUSIC_TRACKS) MUSIC_FILES[t.id] = t.file;
+for (const t of MUSIC_TRACKS) MUSIC_FILES[t.id] = asset(t.file);
 
 // Reserved tracks need correction too (same methodology as MUSIC_TRACKS above).
 const RESERVED_GAIN_DB: Record<string, number> = {

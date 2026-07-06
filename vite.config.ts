@@ -3,8 +3,15 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
+// Base path: '/' for local dev, or a sub-path for a project deploy (GitHub Pages serves a project
+// site under /<repo>/). The deploy pipeline sets DEPLOY_BASE=/decanta-water-sort/. The manifest,
+// icons, navigate fallback and runtime asset URLs (see asset() in audio/engine.ts) all derive from
+// it, so the app works both locally and under a sub-path.
+const base = process.env.DEPLOY_BASE || '/';
+
 // 2D stack: PixiJS (render/canvas) + React/Tailwind (DOM UI overlay).
 export default defineConfig({
+  base,
   plugins: [
     react(),
     tailwindcss(),
@@ -18,7 +25,7 @@ export default defineConfig({
       injectRegister: false,
       includeAssets: ['icons/icon-192.png', 'icons/icon-512.png'],
       manifest: {
-        id: '/',
+        id: base,
         lang: 'pt-BR',
         // ':' instead of an em dash — a common game-naming pattern in app stores
         // (Play Store etc.): "Game Name: Subtitle".
@@ -28,13 +35,13 @@ export default defineConfig({
         theme_color: '#0b1322',
         background_color: '#0b1322',
         display: 'standalone',
-        start_url: '/',
-        scope: '/',
+        start_url: base,
+        scope: base,
         icons: [
-          { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
-          { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-          { src: '/icons/icon-192-maskable.png', sizes: '192x192', type: 'image/png', purpose: 'maskable' },
-          { src: '/icons/icon-512-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+          { src: `${base}icons/icon-192.png`, sizes: '192x192', type: 'image/png', purpose: 'any' },
+          { src: `${base}icons/icon-512.png`, sizes: '512x512', type: 'image/png', purpose: 'any' },
+          { src: `${base}icons/icon-192-maskable.png`, sizes: '192x192', type: 'image/png', purpose: 'maskable' },
+          { src: `${base}icons/icon-512-maskable.png`, sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
       workbox: {
@@ -43,7 +50,7 @@ export default defineConfig({
         // the app "install" huge and slow. Audio is cached on demand (see runtimeCaching).
         globPatterns: ['**/*.{js,css,html,svg,png,ico}'],
         globIgnores: ['audio/**'],
-        navigateFallback: '/index.html',
+        navigateFallback: `${base}index.html`,
         // Reinforcement for the installed PWA: without this, a newly ACTIVATED worker only takes
         // control of clients that didn't yet have a controller — a 2nd window/tab of the same PWA
         // that was already open would stay under the old worker until its OWN reload. The main
