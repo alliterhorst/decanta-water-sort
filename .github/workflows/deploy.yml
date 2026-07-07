@@ -24,7 +24,10 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
+      # `npm install` (not `npm ci`): rolldown ships per-platform binary packages whose optional
+      # @emnapi/* deps float on patch versions, so a lock generated on one OS/npm can fail `npm ci`'s
+      # strict whole-tree validation on the Linux runner. install resolves what the runner needs.
+      - run: npm install --no-audit --no-fund
       # Build under the project sub-path so asset/manifest/SW URLs resolve on Pages.
       - run: npm run build
         env:
