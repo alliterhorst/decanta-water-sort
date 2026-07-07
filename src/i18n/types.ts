@@ -68,6 +68,8 @@ export interface Dictionary {
     preparandoBatalha: string;
     preparandoFase: string;
     erroPreparandoFase: string;
+    carregandoLento: string;
+    tentarNovamente: string;
   };
 
   shop: {

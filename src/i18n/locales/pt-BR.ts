@@ -62,6 +62,8 @@ export const ptBR: Dictionary = {
     preparandoBatalha: 'Preparando batalha…',
     preparandoFase: 'Preparando fase…',
     erroPreparandoFase: 'Não foi possível preparar a fase. Tente novamente.',
+    carregandoLento: 'Está demorando mais que o esperado…',
+    tentarNovamente: 'Tentar novamente',
   },
 
   shop: {

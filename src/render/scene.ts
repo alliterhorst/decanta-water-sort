@@ -175,6 +175,16 @@ export class Scene {
   private frameTimeAccum = 0;
   private qualityDetected = false;
 
+  /** True ONLY once weak-hardware detection has RESOLVED and classified this device as high-end.
+   *  `qualityLevel` defaults to 'high' but is UNCONFIRMED until `qualityDetected` flips (hardware
+   *  heuristic in init, or the 10-frame FPS sample) — so a caller that reads `qualityLevel === 'high'`
+   *  can't tell "confirmed capable" from "not measured yet". Optional background work that must not
+   *  run on weak/unknown hardware (the next-level prefetch) should gate on THIS, staying conservative
+   *  until the classification is real. */
+  get isHighEndConfirmed(): boolean {
+    return this.qualityDetected && this.qualityLevel === 'high';
+  }
+
   // Boss flood
   private bossActive = false;
   private bossFloodInterval = 0;

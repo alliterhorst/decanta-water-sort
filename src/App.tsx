@@ -104,6 +104,39 @@ function shapeSpecFor(id: string) {
   return TUBE_SHAPE_SPECS[id] ?? CLASSIC_SHAPE;
 }
 
+// QA/debug affordances are enabled ONLY on localhost (the dev server and `vite preview`), never on
+// the public deploy. This keeps the fault-injection URL knobs + debug globals fully usable when
+// testing locally while making them completely inert on GitHub Pages — so a crafted link
+// (e.g. ?slowgen=999999999 or ?failgen=99) sent to a real player has no effect.
+const IS_LOCAL = typeof window !== 'undefined'
+  && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname);
+
+// ── QA simulation params (loading/retry UX is impossible to see on fast machines otherwise) ──
+//   ?slowgen=4000  → every level generation takes +4s (see the loading spinner / "taking long")
+//   ?failgen=2     → the first 2 generations FAIL (see the error overlay; the retry then works)
+//   ?prefetch=off  → disable next-level prefetch (A/B benchmark of the prefetch's UI-jank impact)
+// slowgen/failgen also disable prefetching so the visible loading path is what actually runs.
+const QA = new URLSearchParams(IS_LOCAL ? window.location.search : '');
+const QA_SLOW_GEN_MS = Math.max(0, Number(QA.get('slowgen')) || 0);
+let qaFailsLeft = Math.max(0, Number(QA.get('failgen')) || 0);
+const QA_NO_PREFETCH = QA.get('prefetch') === 'off';
+const QA_SIM_ACTIVE = QA_SLOW_GEN_MS > 0 || qaFailsLeft > 0;
+
+/** UI-path generation: the real worker call wrapped with the QA simulation knobs above. */
+function generateForUI(cfg: LevelConfig, maxAttempts?: number, seed?: number): Promise<GeneratedLevel> {
+  let base: Promise<GeneratedLevel>;
+  if (qaFailsLeft > 0) {
+    qaFailsLeft--;
+    base = Promise.reject(new Error('QA failgen'));
+  } else {
+    base = solverClient.generateLevel(cfg, maxAttempts, seed);
+  }
+  if (!QA_SLOW_GEN_MS) return base;
+  return new Promise((resolve, reject) => {
+    setTimeout(() => base.then(resolve, reject), QA_SLOW_GEN_MS);
+  });
+}
+
 export function App() {
   const t = useT();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -132,6 +165,98 @@ export function App() {
   const [optimalMoves, setOptimalMoves] = useState(0);
   const [canUndo, setCanUndo] = useState(false);
   const [generating, setGenerating] = useState(false);
+  // Loader feedback (player-reported: occasional slow generations read as a freeze because the
+  // old overlay sat BELOW the black transition fade — z-20 under z-40 — so nothing was visible):
+  // genSlow shows a "taking longer…" note + retry button; genError offers retry/menu on failure.
+  const [genSlow, setGenSlow] = useState(false);
+  const [genError, setGenError] = useState(false);
+  const [genTick, setGenTick] = useState(0); // bumps per load so the slow timer restarts on retry
+  /** Invalidates in-flight generations: retry/menu bump it; stale .then results are dropped. */
+  const genSeqRef = useRef(0);
+  /** Re-runs the LAST requested load (journey/daily/boss) — wired to the retry buttons. */
+  const retryLoadRef = useRef<null | (() => void)>(null);
+
+  // ── Next-level PREFETCH ─────────────────────────────────────────────────────
+  // While a phase is being played, the NEXT one is generated in the background so the transition
+  // is instant. Jank-safety on weak phones, by construction:
+  //  1. the generation itself runs in the solver Web Worker (another thread — never the UI);
+  //  2. we only DISPATCH it 2.5s after the level loads, and via requestIdleCallback, so even the
+  //     tiny postMessage cost lands on an idle main thread;
+  //  3. prefetch is skipped entirely when the client is on the synchronous fallback (no Worker —
+  //     there a "background" generation WOULD run on the main thread) and in QA sim modes;
+  //  4. it is best-effort: a miss/failure just means the normal loading path generates as before.
+  const prefetchedRef = useRef<{ key: string; level: GeneratedLevel } | null>(null);
+  const prefetchTimerRef = useRef<number | null>(null);
+  /** Epoch for prefetch cancellation. Bumped by cancelPrefetch AND by every new schedule, and
+   *  captured at schedule time — a worker generation already in flight when the epoch changes must
+   *  NOT write its result into prefetchedRef (clearTimeout can't recall an already-dispatched
+   *  postMessage). This is what makes "leave the phase → prefetch stops" actually hold. */
+  const prefetchSeqRef = useRef(0);
+
+  const schedulePrefetch = useCallback((key: string, cfg: LevelConfig) => {
+    if (QA_SIM_ACTIVE || QA_NO_PREFETCH || !solverClient.usingWorker) return;
+    const pseq = ++prefetchSeqRef.current; // supersede any prior scheduled/in-flight prefetch
+    if (prefetchTimerRef.current != null) clearTimeout(prefetchTimerRef.current);
+    prefetchTimerRef.current = window.setTimeout(() => {
+      prefetchTimerRef.current = null;
+      const kick = () => {
+        if (pseq !== prefetchSeqRef.current) return; // cancelled/superseded before dispatch
+        // Gate on CONFIRMED high-end hardware at actual dispatch time (2.5s + idle after schedule),
+        // not at schedule time: the Scene's weak-hardware detection is frame-count-driven and may
+        // not have resolved yet early on (a CPU-throttle benchmark caught an earlier gate doing
+        // nothing). isHighEndConfirmed is false while detection is still pending, so on weak OR
+        // not-yet-measured hardware we skip — the player's stated preference is "wait a bit longer
+        // to load" over "risk any jank while playing", even though generation runs in the worker.
+        if (!sceneRef.current?.isHighEndConfirmed) return;
+        // QA telemetry: record the dispatch (main-thread postMessage) and receipt (worker
+        // reply crossing back to the main thread) so a benchmark can correlate prefetch
+        // activity with long tasks / dropped frames. Inert in normal play (just an array push).
+        const log = (window as unknown as { __prefetchLog?: Array<{ phase: string; t: number }> }).__prefetchLog;
+        log?.push({ phase: 'dispatch', t: performance.now() });
+        solverClient.generateLevel(cfg)
+          .then((lvl) => {
+            if (pseq !== prefetchSeqRef.current) return; // cancelled/superseded while the worker ran
+            prefetchedRef.current = { key, level: lvl };
+            log?.push({ phase: 'receive', t: performance.now() });
+          })
+          .catch(() => { /* best-effort — the normal path will generate on demand */ });
+      };
+      const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback;
+      if (ric) ric(kick, { timeout: 4000 });
+      else kick();
+    }, 2500);
+  }, []);
+
+  /** Consumes the prefetched level if it matches `key` (single-slot cache). */
+  const takePrefetched = (key: string): GeneratedLevel | null => {
+    const hit = prefetchedRef.current;
+    if (hit && hit.key === key) {
+      prefetchedRef.current = null;
+      return hit.level;
+    }
+    return null;
+  };
+
+  /** Called when the player leaves the phase screen for the menu (goMenu, error recovery).
+   *  A pending prefetch is otherwise harmless if left to fire — it is worker-only, and its
+   *  single-slot cache is exact-key-matched (never misapplied to the wrong phase/mode) — but
+   *  there is no reason to let a background generation run for a phase the player may never
+   *  revisit. Cancelling here makes "leave the phase" deterministically stop any prefetch
+   *  intent, instead of "it happens to fire in the background and gets used or discarded later". */
+  const cancelPrefetch = () => {
+    prefetchSeqRef.current++; // invalidate any generation already dispatched to the worker
+    if (prefetchTimerRef.current != null) {
+      clearTimeout(prefetchTimerRef.current);
+      prefetchTimerRef.current = null;
+    }
+    prefetchedRef.current = null;
+  };
+
+  // Unmount safety: drop any pending prefetch timer so it can't fire against a dead component
+  // (matters in dev StrictMode's double-mount; App is the root and rarely unmounts in production).
+  useEffect(() => () => {
+    if (prefetchTimerRef.current != null) clearTimeout(prefetchTimerRef.current);
+  }, []);
   const [showShop, setShowShop] = useState(false);
   const [deadlocked, setDeadlocked] = useState(false);
   const [wonCoins, setWonCoins] = useState(0);
@@ -216,6 +341,15 @@ export function App() {
     return () => clearTimeout(t);
   }, [hintNudge]);
 
+  // "Taking longer than expected" appears after 6s of generation; genTick restarts the timer on
+  // retry (the boolean `generating` alone wouldn't re-run this effect for a retry mid-flight).
+  useEffect(() => {
+    if (!generating) { setGenSlow(false); return; }
+    setGenSlow(false);
+    const timer = setTimeout(() => setGenSlow(true), 6000);
+    return () => clearTimeout(timer);
+  }, [generating, genTick]);
+
   // Only show the "computing" indicator if the hint takes longer than ~150ms (no flicker in the
   // common case)
   const [hintSlow, setHintSlow] = useState(false);
@@ -297,8 +431,12 @@ export function App() {
       document.addEventListener('touchstart', unlockAudio, { once: true });
 
       sceneRef.current = scene;
-      (window as unknown as { __scene: Scene }).__scene = scene;
-      (window as unknown as { __audio: typeof audio }).__audio = audio; // debug/QA
+      // Debug/QA globals — localhost only (see IS_LOCAL): not exposed on the public build.
+      if (IS_LOCAL) {
+        (window as unknown as { __scene: Scene }).__scene = scene;
+        (window as unknown as { __audio: typeof audio }).__audio = audio;
+        (window as unknown as { __solver: typeof solverClient }).__solver = solverClient;
+      }
       window.addEventListener('resize', onResize);
       document.addEventListener('visibilitychange', onVisibility);
 
@@ -343,11 +481,12 @@ export function App() {
     };
   }, [mode, phase, optimalMoves]);
 
-  /** Last-resort recovery when level generation FAILS (worker died twice / timed out): clears
-   *  every overlay that could pin a black screen, restores the normal theme, and lands on the
-   *  menu with a toast — the player retries with one tap. Without this, a dead worker meant a
-   *  permanently black transition that only closing the app resolved (real field report). */
+  /** "Menu" action of the generation-error overlay: cancels the failed load, clears every
+   *  overlay that could pin a black screen, restores the normal theme, and lands on the menu.
+   *  (The overlay itself already told the player what happened — no toast needed.) */
   const recoverFromGenerationFailure = useCallback(() => {
+    genSeqRef.current++; // drop any in-flight generation result
+    setGenError(false);
     setGenerating(false);
     setTransitioning(false);
     setWon(false);
@@ -355,17 +494,21 @@ export function App() {
     setBossActive(false);
     sceneRef.current?.disableBossMode();
     currentBossRef.current = null;
+    cancelPrefetch();
     const w = loadWallet();
     sceneRef.current?.setTheme(activeBg(w).deep, activeTube(w).rim);
     setScreen('menu');
     void audio.startMusic(selectMenuTrack(loadPrefs().musicTrack));
-    setToast({ msg: t.hud.erroPreparandoFase, id: Date.now() });
-  }, [t]);
+  }, []);
 
   const loadJourneyPhase = useCallback((phaseIndex: number, jMode?: JourneyMode) => {
     const s = sceneRef.current;
     if (!s) return;
     const resolvedMode = jMode ?? journeyModeRef.current;
+    retryLoadRef.current = () => loadJourneyPhase(phaseIndex, jMode);
+    const seq = ++genSeqRef.current;
+    setGenTick(x => x + 1);
+    setGenError(false);
     setGenerating(true);
     setWon(false);
     setCanUndo(false);
@@ -376,7 +519,7 @@ export function App() {
     setTubesLeft(-1);
     wonHandled.current = false;
     const cfg = levelConfig(phaseIndex, resolvedMode);
-    solverClient.generateLevel(cfg).then((lvl) => {
+    const applyLevel = (lvl: GeneratedLevel) => {
       savedLevelRef.current = lvl;
       s.moves = 0;
       setMoves(0);
@@ -391,12 +534,32 @@ export function App() {
       setTubesLeft(mCfg.maxExtraTubes);
       setGenerating(false);
       setTransitioning(false);
-    }).catch(recoverFromGenerationFailure);
-  }, [recoverFromGenerationFailure]);
+      // While this phase is played, quietly prepare the next one (see prefetch notes above).
+      schedulePrefetch(`j:${phaseIndex + 1}:${resolvedMode}`, levelConfig(phaseIndex + 1, resolvedMode));
+    };
+    const cached = takePrefetched(`j:${phaseIndex}:${resolvedMode}`);
+    if (cached) {
+      applyLevel(cached); // instant transition — generated in the background during the last phase
+      return;
+    }
+    generateForUI(cfg).then((lvl) => {
+      if (seq !== genSeqRef.current) return; // superseded by a retry/menu — drop the stale level
+      applyLevel(lvl);
+    }).catch(() => {
+      if (seq !== genSeqRef.current) return; // a newer load owns the UI now
+      setGenerating(false);
+      setTransitioning(false);
+      setGenError(true); // overlay offers "try again" / menu — never a stuck black screen
+    });
+  }, [schedulePrefetch]);
 
   const loadDailyChallenge = useCallback(() => {
     const s = sceneRef.current;
     if (!s) return;
+    retryLoadRef.current = () => loadDailyChallenge();
+    const seq = ++genSeqRef.current;
+    setGenTick(x => x + 1);
+    setGenError(false);
     setGenerating(true);
     setWon(false);
     setCanUndo(false);
@@ -408,7 +571,8 @@ export function App() {
     wonHandled.current = false;
     const seed = seedFromString('decanta-daily-' + todayStr());
     const cfg: LevelConfig = { colors: 7, capacity: 5, emptyTubes: 2, lockedTubes: 1, lockMoves: 4 };
-    solverClient.generateLevel(cfg, 200, seed).then((lvl) => {
+    generateForUI(cfg, 200, seed).then((lvl) => {
+      if (seq !== genSeqRef.current) return; // superseded by a retry/menu — drop the stale level
       savedLevelRef.current = lvl;
       s.moves = 0;
       setMoves(0);
@@ -425,8 +589,14 @@ export function App() {
       setHintsLeft(-1);
       setTubesLeft(-1);
       setGenerating(false);
-    }).catch(recoverFromGenerationFailure);
-  }, [recoverFromGenerationFailure]);
+      setTransitioning(false); // parity with the journey/boss loaders — never leave the black fade up
+    }).catch(() => {
+      if (seq !== genSeqRef.current) return;
+      setGenerating(false);
+      setTransitioning(false);
+      setGenError(true);
+    });
+  }, []);
 
   // Victory: reward + save progress + check for boss
   useEffect(() => {
@@ -512,6 +682,10 @@ export function App() {
   const handleBossFight = useCallback((boss: BossData) => {
     const s = sceneRef.current;
     if (!s) return;
+    retryLoadRef.current = () => handleBossFight(boss);
+    const seq = ++genSeqRef.current;
+    setGenTick(x => x + 1);
+    setGenError(false);
     currentBossRef.current = boss;
     setPendingBoss(null);
     setBossActive(true);
@@ -524,7 +698,7 @@ export function App() {
     setDeadlocked(false);
     setWonCoins(0);
     wonHandled.current = false;
-    solverClient.generateLevel(boss.levelConfig).then((lvl) => {
+    const applyLevel = (lvl: GeneratedLevel) => {
       savedLevelRef.current = lvl;
       s.moves = 0;
       setMoves(0);
@@ -539,8 +713,31 @@ export function App() {
       s.setPowerUpLimits(bossCfg.maxUndos, bossCfg.maxHints, bossCfg.maxExtraTubes);
       s.enableBossMode(boss.floodInterval, boss.floodCount);
       setGenerating(false);
-    }).catch(recoverFromGenerationFailure);
-  }, [recoverFromGenerationFailure]);
+      // While the boss is fought, prepare the phase that follows the victory.
+      const nextPhaseIdx = bossPhaseRef.current + 1;
+      schedulePrefetch(`j:${nextPhaseIdx}:${journeyModeRef.current}`, levelConfig(nextPhaseIdx, journeyModeRef.current));
+    };
+    const cached = takePrefetched(`b:${boss.id}`);
+    if (cached) {
+      applyLevel(cached); // generated in the background while the intro screen was showing
+      return;
+    }
+    generateForUI(boss.levelConfig).then((lvl) => {
+      if (seq !== genSeqRef.current) return; // superseded by a retry/menu — drop the stale level
+      applyLevel(lvl);
+    }).catch(() => {
+      if (seq !== genSeqRef.current) return;
+      setGenerating(false);
+      setTransitioning(false);
+      setGenError(true);
+    });
+  }, [schedulePrefetch]);
+
+  // The boss INTRO screen is on for a few seconds while the player reads it — perfect window to
+  // prefetch the boss board so "Enfrentar!" starts instantly.
+  useEffect(() => {
+    if (pendingBoss) schedulePrefetch(`b:${pendingBoss.id}`, pendingBoss.levelConfig);
+  }, [pendingBoss, schedulePrefetch]);
 
   const startJourney = () => {
     // Mobile, first time: offer fullscreen before opening the mode selector.
@@ -706,6 +903,11 @@ export function App() {
     setScreen('menu');
     setTransitioning(false);
     setDeadlocked(false);
+    // Cancel any in-flight generation: its .then must not repaint the board under the menu.
+    genSeqRef.current++;
+    setGenerating(false);
+    setGenError(false);
+    cancelPrefetch();
     void audio.startMusic(selectMenuTrack(loadPrefs().musicTrack));
     if (phase === -1) {
       const w = loadWallet();
@@ -1054,11 +1256,50 @@ export function App() {
         </div>
       )}
 
-      {/* ── GENERATING OVERLAY ───────────────────────────────────────── */}
-      {generating && (
-        <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-          <div className="rounded-xl bg-slate-900/85 px-5 py-3 text-sm text-slate-300 backdrop-blur">
-            {isBoss ? t.hud.preparandoBatalha : t.hud.preparandoFase}
+      {/* ── GENERATING / ERROR OVERLAY ───────────────────────────────────
+          z-50 ON PURPOSE: the phase-transition fade is a SOLID black layer at z-40 — a lower
+          overlay would sit underneath it, so on slower devices a transition looked like a frozen
+          black screen with no feedback (real player report). This must win. */}
+      {(generating || genError) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="flex w-full max-w-[17rem] flex-col items-center gap-4 rounded-2xl bg-slate-900/95 px-7 py-6 text-center shadow-2xl">
+            {!genError ? (
+              <>
+                <div className="h-9 w-9 animate-spin rounded-full border-[3px] border-slate-700 border-t-teal-400" />
+                <div className="text-sm font-medium text-slate-200">
+                  {isBoss || bossActive ? t.hud.preparandoBatalha : t.hud.preparandoFase}
+                </div>
+                {genSlow && (
+                  <>
+                    <div className="text-xs text-slate-500">{t.hud.carregandoLento}</div>
+                    <button
+                      onClick={() => retryLoadRef.current?.()}
+                      className="w-full rounded-xl bg-slate-700 py-2.5 text-sm font-medium text-slate-200 transition active:scale-95"
+                    >
+                      {t.hud.tentarNovamente}
+                    </button>
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="text-sm font-medium text-amber-300">{t.hud.erroPreparandoFase}</div>
+                <div className="flex w-full flex-col gap-2">
+                  <button
+                    onClick={() => { setGenError(false); retryLoadRef.current?.(); }}
+                    className="w-full rounded-xl bg-teal-400 py-2.5 text-sm font-semibold text-slate-900 transition active:scale-95"
+                  >
+                    {t.hud.tentarNovamente}
+                  </button>
+                  <button
+                    onClick={recoverFromGenerationFailure}
+                    className="w-full rounded-xl bg-slate-700 py-2.5 text-sm font-medium text-slate-200 transition active:scale-95"
+                  >
+                    {t.common.menu}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

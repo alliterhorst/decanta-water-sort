@@ -60,6 +60,8 @@ export const en: Dictionary = {
     preparandoBatalha: 'Preparing battle…',
     preparandoFase: 'Preparing level…',
     erroPreparandoFase: 'Could not prepare the level. Please try again.',
+    carregandoLento: 'Taking longer than expected…',
+    tentarNovamente: 'Try again',
   },
 
   shop: {

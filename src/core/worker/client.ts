@@ -112,6 +112,13 @@ export class SolverClient {
     this.spawn();
   }
 
+  /** True when calls actually run OFF the main thread. Background prefetching must check this:
+   *  in the synchronous fallback (no Worker support), a "background" generation would run on the
+   *  main thread and jank the current level — exactly what prefetch exists to avoid. */
+  get usingWorker(): boolean {
+    return this.worker !== null;
+  }
+
   private callSync<T>(req: WorkerRequestBody): T {
     if (req.kind === 'generateLevel') {
       const rng = req.seed !== undefined ? mulberry32(req.seed) : Math.random;
