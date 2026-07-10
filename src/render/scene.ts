@@ -15,7 +15,7 @@ import gsap from 'gsap';
 import { BG_DEEP, GLASS, GOLD, LIQUID_COLORS, lighten } from '../game/palette';
 import { WILD } from '../core/types';
 import type { GameState } from '../core/types';
-import { canPour, pourAmount, applyMove, isWin, cloneState } from '../core/engine';
+import { canPour, pourAmount, applyMove, isWin, cloneState, isLocked } from '../core/engine';
 import { solverClient } from '../core/worker/client';
 import {
   buildTubeShape,
@@ -262,7 +262,16 @@ export class Scene {
         }
       }, 3000);
     });
-    this.app.stage.addChild(this.shadowLayer, this.glassBack, this.liquid, this.hiddenLayer, this.glassFront, this.hintLayer, this.lift, this.streamLayer, this.capLayer);
+    // capLayer sits BEFORE lift: a locked tube's cork (drawn once, globally, every frame in
+    // capLayer — see drawCaps()) must render BEHIND whatever tube is currently lifted in front
+    // of it (dragged/mid-pour), not as a layer permanently pinned above everything. The cork's
+    // OWN tube can itself enter `lift` mid-drag (isLocked is only checked at drop, in canPour) —
+    // in that rare case its own cap renders a frame behind its own glass until the drag bounces
+    // back (canPour always rejects it); a strict fix would need a per-tube cap container
+    // participating in the same reparenting as backG/liquidG/frontG, which is a larger change
+    // for a near-invisible edge case (field bug: real corks floating over every passing tube,
+    // reported 2026-07-09 — see decanta-internal/ROTEIRO-CORRECOES-2026-07-09.md, studio repo).
+    this.app.stage.addChild(this.shadowLayer, this.glassBack, this.liquid, this.hiddenLayer, this.glassFront, this.capLayer, this.hintLayer, this.lift, this.streamLayer);
     // Persistent Graphics for the per-frame layers (recreated in rebuild after the wipe)
     this.capLayer.addChild(this.capG);
     this.shadowLayer.addChild(this.shadowG);
@@ -776,7 +785,9 @@ export class Scene {
       if (slab.length < 3) continue;
       const base = colors[b] === WILD ? WILD_COLOR
                  : colors[b] === HIDDEN_UNIT ? HIDDEN_COLOR
-                 : LIQUID_COLORS[colors[b]];
+                 // ?? guard: an out-of-palette index must degrade to grey, never crash the
+                 // renderer (Pixi throws "Unable to convert color undefined" → black screen).
+                 : LIQUID_COLORS[colors[b]] ?? 0x888888;
       g.poly(flat(slab)).fill({ color: base }); // solid color — flat (color-blindness accessibility)
       if (b === surfaceY.length - 1) this.drawSurface(g, worldInterior, topY, base);
 
@@ -908,7 +919,11 @@ export class Scene {
       return;
     }
 
-    if (this.busy.has(i) || this.isTubeComplete(i)) return;
+    // A LOCKED tube (cork not yet dissolved) can't pour in or out (canPour blocks both), so it
+    // must not be selectable — tapping it does nothing. Before locked tubes spawned incomplete
+    // (capacity-1 + intruder), they were uniform+full, so isTubeComplete() happened to skip them;
+    // now the guard checks the real rule (isLocked) instead of relying on that coincidence.
+    if (this.busy.has(i) || this.isTubeComplete(i) || isLocked(this.state, i)) return;
 
     if (this.selected == null) {
       if (this.state.tubes[i].length > 0) this.select(i);
@@ -926,8 +941,12 @@ export class Scene {
   private onPointerDown(x: number, y: number): void {
     const i = this.tubeAt(x, y);
     this.dragMoved = false;
-    // busy or empty tubes only take part in the tap flow (onPointerUp → onTap)
-    if (i == null || this.busy.has(i) || this.isTubeComplete(i) || this.state.tubes[i].length === 0) {
+    // Not draggable: busy, complete, empty, or LOCKED (cork). A locked tube can't be a pour
+    // source or destination, so dragging it is a dead gesture — the same isLocked() check the
+    // tap flow uses (see onTap). Without it, a locked tube in the new incomplete shape
+    // (capacity-1 + intruder, no longer isTubeComplete) could be lifted but never poured.
+    if (i == null || this.busy.has(i) || this.isTubeComplete(i)
+        || this.state.tubes[i].length === 0 || isLocked(this.state, i)) {
       this.dragTube = null;
       return;
     }
@@ -1400,7 +1419,7 @@ export class Scene {
     const shownUnits = this.fillCap[to] ?? (this.renderTubes[to] ?? this.state.tubes[to]).length;
     const surfY = waterline(destInterior, Math.max(0, shownUnits) * unitVol);
     const target: V2 = { x: this.centers[to].x, y: surfY };
-    const base = color === WILD ? WILD_COLOR : LIQUID_COLORS[color];
+    const base = color === WILD ? WILD_COLOR : LIQUID_COLORS[color] ?? 0x888888;
 
     const g = this.getStreamG(from);
     g.clear();
@@ -1442,7 +1461,7 @@ export class Scene {
         const lip = toWorld({ x: 0, y: -this.tubeH / 2 }, pose);
         const dotR = Math.max(3.5, this.tubeW * 0.065);
         g.circle(lip.x, lip.y - dotR * 2.2, dotR)
-          .fill({ color: LIQUID_COLORS[filterColor] })
+          .fill({ color: LIQUID_COLORS[filterColor] ?? 0x888888 })
           .stroke({ color: 0xffffff, alpha: 0.4, width: Math.max(1, dotR * 0.25) });
       }
 

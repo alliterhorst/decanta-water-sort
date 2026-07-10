@@ -12,6 +12,12 @@ const base = process.env.DEPLOY_BASE || '/';
 // 2D stack: PixiJS (render/canvas) + React/Tailwind (DOM UI overlay).
 export default defineConfig({
   base,
+  // Stamped into the bundle at BUILD time (this config runs once, in Node, at `vite build` —
+  // not in a request/runtime context, so Date.now() here is safe and standard practice). Lets
+  // the app compare "the build I'm running" against "the build the player last acknowledged"
+  // (src/lib/appVersion.ts) to show the one-time "what's new" note after a silent background
+  // update — see src/lib/appVersion.ts and ui/UpdateReadyModal.tsx.
+  define: { __APP_VERSION__: JSON.stringify(String(Date.now())) },
   plugins: [
     react(),
     tailwindcss(),

@@ -131,6 +131,20 @@ export const en: Dictionary = {
     qualquerCorPode: 'any color can be poured into a tube with a wild.',
   },
 
+  updateReady: {
+    tituloDisponivel: 'New update available',
+    tituloNovidades: 'Latest update',
+    notas: [
+      '🍇 New tube color: wine violet!',
+      '💀 Extreme mode supercharged — a real challenge in every phase',
+      '💡 Smarter hints: there is always a way out',
+      '✨ Polished visuals and a more stable game under the hood',
+    ],
+    depois: 'Later',
+    instalarAgora: 'Install now',
+    ok: 'OK',
+  },
+
   modes: {
     zen: {
       name: 'Zen',
@@ -145,7 +159,7 @@ export const en: Dictionary = {
     extreme: {
       name: 'Extreme',
       tagline: "One wrong move and it's over",
-      description: 'More colors, less empty space. No undo, no extra tube. Only 3 hints.',
+      description: 'More colors and early mechanics. No undo, no extra tube. Only 3 hints.',
     },
   },
 

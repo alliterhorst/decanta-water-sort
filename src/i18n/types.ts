@@ -136,6 +136,17 @@ export interface Dictionary {
     qualquerCorPode: string;
   };
 
+  updateReady: {
+    tituloDisponivel: string; // variant 'available' — an update is ready to install
+    tituloNovidades: string;  // variant 'whatsNew' — already applied in the background, informational
+    /** What changed, as SHORT sale-y lines (emoji included) — update on every release worth
+     *  announcing. Keep it to 3-4 items, one line each; the modal renders them as a list. */
+    notas: string[];
+    depois: string;
+    instalarAgora: string;
+    ok: string;
+  };
+
   modes: {
     zen: { name: string; tagline: string; description: string };
     balanced: { name: string; tagline: string; description: string };

@@ -17,10 +17,24 @@ export interface GameSession {
   journeyMode?: string; // 'zen' | 'balanced' | 'extreme' — journey mode for this session (only when mode === 'journey' and not a boss); absent in sessions saved before this field existed
 }
 
+/** Strips corks (locks) from a board — used when RESTORING a saved session. Locked tubes were
+ *  removed from generation (2026-07-10), but a session saved by an older build can still carry a
+ *  cork; without this a player mid-phase during the update would keep seeing it. Unlocking only
+ *  ever helps (a corked tube becomes playable) and can never make a solvable board unsolvable, so
+ *  this migration is safe. Boss fights never used locks, so nothing legitimate is dropped. */
+function stripLocks(s: GameState | undefined): void {
+  if (s && s.locks) delete s.locks;
+}
+
 export function loadSession(): GameSession | null {
   try {
     const raw = localStorage.getItem(SESSION_KEY);
-    return raw ? (JSON.parse(raw) as GameSession) : null;
+    if (!raw) return null;
+    const s = JSON.parse(raw) as GameSession;
+    stripLocks(s.state);
+    stripLocks(s.initialState);
+    if (Array.isArray(s.history)) s.history.forEach(stripLocks);
+    return s;
   } catch { return null; }
 }
 

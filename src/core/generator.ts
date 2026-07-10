@@ -73,27 +73,39 @@ function shuffle<T>(a: T[], rng: RNG = Math.random): T[] {
 function randomState(cfg: LevelConfig, rng: RNG): GameState {
   const nLocked = Math.min(cfg.lockedTubes ?? 0, cfg.colors);
 
-  // Locked tubes must be UNIFORM in color — set aside reserved colors before shuffling.
-  // Shuffle the color order so the "locked colors" are random.
+  // DORMANT since 2026-07-10: levelConfig no longer requests locked tubes (nLocked is always 0 —
+  // corks were removed from phase generation, see game/levels.ts), so the locked-tube branch
+  // below doesn't run in practice. It is kept correct for a possible future "frozen tube" mechanic
+  // with a non-cork visual. If revived: locked tubes are ALMOST uniform (capacity-1 of a reserved
+  // color + 1 intruder on top) so they never START complete; the pool bookkeeping keeps the total
+  // at colors × capacity; and since randomState runs BEFORE solveLength() in generateLevel's loop,
+  // the solver always validates the FINAL board — an unsolvable arrangement is rejected, never
+  // shipped.
   const colorOrder = shuffle(Array.from({ length: cfg.colors }, (_, i) => i), rng);
   const lockedColors = colorOrder.slice(0, nLocked);
   const lockedSet = new Set(lockedColors);
 
-  // Pool of only the colors NOT reserved for locked tubes
+  // Pool: full sets of the non-reserved colors + the ONE leftover unit of each reserved color
+  // (its tube only holds capacity-1 of it). Total still colors × capacity.
   const pool: number[] = [];
   for (let c = 0; c < cfg.colors; c++) {
-    if (!lockedSet.has(c)) {
-      for (let k = 0; k < cfg.capacity; k++) pool.push(c);
-    }
+    const units = lockedSet.has(c) ? 1 : cfg.capacity;
+    for (let k = 0; k < units; k++) pool.push(c);
   }
   shuffle(pool, rng);
 
   const tubes: number[][] = [];
-  // Locked tubes (indices 0..nLocked-1): uniform color — invariant guaranteed here
+  // Locked tubes (indices 0..nLocked-1): capacity-1 uniform + 1 intruder from the pool.
   for (const c of lockedColors) {
-    tubes.push(new Array(cfg.capacity).fill(c));
+    // First pool unit of a DIFFERENT color — taking c itself would recreate a complete tube.
+    let intruderIdx = pool.findIndex((u) => u !== c);
+    if (intruderIdx === -1) intruderIdx = 0; // degenerate 1-color config; rejection loop handles it
+    const intruder = pool.splice(intruderIdx, 1)[0];
+    tubes.push([...new Array(cfg.capacity - 1).fill(c), intruder]);
   }
-  // Free tubes: from the shuffled pool
+  // Free tubes: from the shuffled pool. Bookkeeping: pool started at colors×capacity minus
+  // nLocked×(capacity-1) reserved units, minus nLocked intruders = (colors-nLocked)×capacity —
+  // exactly filling the remaining full tubes.
   const freeTubes = cfg.colors - nLocked;
   for (let t = 0; t < freeTubes; t++) {
     tubes.push(pool.slice(t * cfg.capacity, (t + 1) * cfg.capacity));
@@ -161,7 +173,8 @@ function applyHidden(state: GameState, cfg: LevelConfig, rng: RNG): void {
 
 /**
  * Caps the first `lockedTubes` tubes with a cork that lasts `lockMoves` moves.
- * Indices 0..lockedTubes-1 are guaranteed to be uniform in color (see randomState).
+ * Indices 0..lockedTubes-1 hold capacity-1 uniform units + 1 intruder on top (see randomState —
+ * a locked tube must never start complete).
  */
 function applyLocks(state: GameState, cfg: LevelConfig, _rng: RNG): void {
   const n = cfg.lockedTubes ?? 0;
@@ -187,10 +200,10 @@ export function generateLevel(
   for (let i = 0; i < attempts; i++) {
     const state = randomState(cfg, rng);
     if (isWin(state)) continue;
-    // Reject levels with a tube already solved at the start — except locked ones (uniform by design)
-    const lockArr = state.locks ?? [];
-    if (state.tubes.some((t, i) =>
-      !(lockArr[i] ?? 0) &&
+    // Reject levels with ANY tube already solved at the start — including locked ones (they now
+    // spawn capacity-1 + intruder by construction; this guard is the backstop for the direction's
+    // rule "no tube may ever start complete", 2026-07-09).
+    if (state.tubes.some((t) =>
       t.length === cfg.capacity && t[0] >= 0 && t.every(c => c === t[0])
     )) continue;
     // Validation-only solve: we never use the move PATH here, just solvability + length —

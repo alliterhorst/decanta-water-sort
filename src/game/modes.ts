@@ -56,7 +56,13 @@ export const MODES: Record<JourneyMode, ModeConfig> = {
     colorOffset: 1,
     maxColors: 9,
     mechTier: 1,
-    emptyTubesBonus: -1,
+    // Was -1 (single empty tube). Measured solvability of random boards (200 trials/config,
+    // 2026-07-09): with 1 empty tube, 7 colors ≈ 5.5% solvable, 8 ≈ 1.5%, 9 = 0% — the
+    // generator burned all attempts and fell back to a TRIVIAL pre-solved board on high
+    // phases. With 2 empty tubes every extreme config is 100% solvable (avg optimal 28-44
+    // moves). Extreme's identity now rests on +1 color, early mechanics and hard power-up
+    // limits — not on an empty-tube count that made real puzzles ungeneratable.
+    emptyTubesBonus: 0,
     maxUndos: 0,
     maxHints: 3,
     maxExtraTubes: 0,

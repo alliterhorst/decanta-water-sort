@@ -8,9 +8,9 @@
  *     test session. `?sw=on` turns it back on (useful for checking the REAL PWA/offline behavior
  *     when that's the intent of the test).
  *
- *  2. AUTO-UPDATE: checks whether a new version has been published instead of waiting for the
- *     browser's default cycle for checking sw.js (which can take up to 24h). Triggers, from most
- *     to least common in an INSTALLED PWA (symptom: "only updates after clearing the cache"):
+ *  2. UPDATE DETECTION: checks whether a new version has been published instead of waiting for
+ *     the browser's default cycle for checking sw.js (which can take up to 24h). Triggers, from
+ *     most to least common in an INSTALLED PWA (symptom: "only updates after clearing the cache"):
  *       a) page load (F5, reopening the app/tab);
  *       b) focus returns (tab/app switch, or screen unlock — 'visibilitychange');
  *       c) 'pageshow' with bfcache (Safari/iOS often restores the frozen page from memory
@@ -18,14 +18,33 @@
  *          reliably, visibilitychange; pageshow is the only signal left in that case);
  *       d) a periodic interval while the app stays open in the foreground without ever losing
  *          focus (a long play session) — without it, only (a)/(b)/(c) would ever fire.
- *     If there's a new version, it applies it with ONE automatic reload (guarded against loops).
+ *     When a new version is found, it does NOT reload on its own anymore (real field complaint,
+ *     2026-07-09: a silent auto-reload could fire mid-phase, mid-pour). Instead it calls whatever
+ *     handler App.tsx registered via `setUpdateReadyHandler` — App decides WHEN it's safe to
+ *     show the "update installed" modal (immediately at the menu; deferred until back at the
+ *     menu if a phase is in progress) and hands the player an explicit "reiniciar agora" choice.
+ *     `pendingApply` covers the (practically negligible, but real) race where the update check
+ *     resolves before App.tsx's mount effect has registered its handler.
  */
 import { registerSW } from 'virtual:pwa-register';
 
 const SW_DISABLED_KEY = 'decanta:sw-disabled';
-const RELOAD_GUARD_KEY = 'decanta:sw-reload-ts';
-const RELOAD_GUARD_WINDOW_MS = 10_000;
 const PERIODIC_CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30min — long play session without losing focus
+
+type UpdateReadyHandler = (applyNow: () => void) => void;
+let updateReadyHandler: UpdateReadyHandler | null = null;
+let pendingApply: (() => void) | null = null;
+
+/** App.tsx calls this once on mount. If an update was already detected before the handler
+ *  registered, it fires right away instead of being silently dropped. */
+export function setUpdateReadyHandler(handler: UpdateReadyHandler): void {
+  updateReadyHandler = handler;
+  if (pendingApply) {
+    const apply = pendingApply;
+    pendingApply = null;
+    handler(apply);
+  }
+}
 
 function readSwFlagFromUrl(): 'on' | 'off' | null {
   const v = new URLSearchParams(location.search).get('sw');
@@ -81,11 +100,12 @@ export async function initPwa(): Promise<void> {
       setInterval(() => { if (document.visibilityState === 'visible') checkNow(); }, PERIODIC_CHECK_INTERVAL_MS);
     },
     onNeedRefresh() {
-      // Loop guard: if we already reloaded for this recently, don't reload again.
-      const last = sessionStorage.getItem(RELOAD_GUARD_KEY);
-      if (last && Date.now() - Number(last) < RELOAD_GUARD_WINDOW_MS) return;
-      sessionStorage.setItem(RELOAD_GUARD_KEY, String(Date.now()));
-      void updateSW(true); // apply the new version (skipWaiting) and reload the page
+      // Hand control to App.tsx instead of reloading on our own (real field complaint,
+      // 2026-07-09: a silent reload could fire mid-phase). App decides WHEN to show the modal
+      // and only reloads if the player taps "reiniciar agora".
+      const applyNow = () => void updateSW(true); // skipWaiting + reload
+      if (updateReadyHandler) updateReadyHandler(applyNow);
+      else pendingApply = applyNow; // App hasn't registered yet — deliver as soon as it does
     },
   });
 }

@@ -131,6 +131,20 @@ export const es: Dictionary = {
     qualquerCorPode: 'cualquier color puede verterse en un tubo con comodín.',
   },
 
+  updateReady: {
+    tituloDisponivel: 'Nueva actualización disponible',
+    tituloNovidades: 'Última actualización',
+    notas: [
+      '🍇 ¡Color nuevo en los tubos: vino violeta!',
+      '💀 Modo Extremo potenciado — desafío de verdad en cada nivel',
+      '💡 Pistas más inteligentes: siempre te muestran una salida',
+      '✨ Visual pulido y un juego más estable por dentro',
+    ],
+    depois: 'Después',
+    instalarAgora: 'Instalar ahora',
+    ok: 'OK',
+  },
+
   modes: {
     zen: {
       name: 'Zen',
@@ -145,7 +159,7 @@ export const es: Dictionary = {
     extreme: {
       name: 'Extremo',
       tagline: 'Un movimiento en falso y se acabó',
-      description: 'Más colores, menos espacio vacío. Sin deshacer, sin tubo extra. Solo 3 pistas.',
+      description: 'Más colores y mecánicas desde el inicio. Sin deshacer, sin tubo extra. Solo 3 pistas.',
     },
   },
 

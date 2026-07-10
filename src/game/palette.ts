@@ -10,8 +10,13 @@ export const ACCENT = 0x5ad1c4;
 export const GOLD = 0xffcf66; // coins, victory, "full tube"
 
 /**
- * Liquid colors (8). Staggered in luminance (a brightness ladder) so they stay distinct
+ * Liquid colors (9). Staggered in luminance (a brightness ladder) so they stay distinct
  * even under color blindness — risky pairs (red/green, orange/yellow) sit on different steps.
+ *
+ * ⚠️ The palette MUST cover the highest `maxColors` of every mode in game/modes.ts.
+ * A 9th color was missing while extreme mode declared maxColors=9: high extreme phases
+ * indexed LIQUID_COLORS[8] → undefined → Pixi threw "Unable to convert color undefined"
+ * → black screen (real player report, 2026-07-09). modes.test.ts now enforces the invariant.
  */
 export const LIQUID_COLORS: number[] = [
   0xe63950, // 0 cherry red (mid-low)
@@ -22,6 +27,13 @@ export const LIQUID_COLORS: number[] = [
   0x8a4fe0, // 5 purple (low)
   0xff8fc5, // 6 pink (high-light)
   0x19c7d6, // 7 cyan (mid-high)
+  0xa421ab, // 8 vinho-violeta (lowest step) — hue 297°, the only genuinely free hue corridor in
+            //   the wheel (magenta/violet, ~33-34° from purple/pink on either side — the previous
+            //   9th color at hue 30° was really just darkened/desaturated orange (25°), which is
+            //   what read as mud/dirt; direction rejected it 2026-07-10). Verified safe under
+            //   simulated protanopia+deuteranopia against all 8 existing colors (not just hue
+            //   angle) — closest neighbor distance ≥53 in simulated RGB space, well above the
+            //   ~25 confusion-risk threshold. Chosen by the direction from 6 art-director options.
 ];
 
 export function lighten(hex: number, amt: number): number {

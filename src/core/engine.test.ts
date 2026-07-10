@@ -64,6 +64,20 @@ describe('win and deadlock', () => {
     expect(hasNoMoves(s)).toBe(true);
     expect(legalMoves(s).length).toBe(0);
   });
+
+  it('a "soft" deadlock: legal pours exist, but NONE lead to a win (hasNoMoves lies about it)', () => {
+    // Real field bug (2026-07-09): the UI's deadlock toast and the Hint fallback both gated
+    // exclusively on hasNoMoves()/isDeadlocked() — the "hard" deadlock. This state proves that
+    // flag is not the full picture: canPour finds a legal move (tube 0 or 1 can pour into the
+    // empty tube 2), so hasNoMoves is false, yet the position is UNWINNABLE — confirmed by a
+    // full (non-exhausted) search, not a search-budget artifact.
+    const s = st([[0, 1, 1, 0], [0, 1, 1, 0], []], 4);
+    expect(hasNoMoves(s), 'a legal pour exists (e.g. tube 0 -> empty tube 2)').toBe(false);
+    const r = solve(s);
+    expect(r.exhausted, 'must be a PROVEN result, not a budget cutoff').toBe(false);
+    expect(r.solved, 'no move sequence from here reaches a win').toBe(false);
+    expect(isSolvable(s)).toBe(false);
+  });
 });
 
 describe('capped tube (cork)', () => {

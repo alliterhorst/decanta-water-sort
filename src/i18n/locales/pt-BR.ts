@@ -133,6 +133,20 @@ export const ptBR: Dictionary = {
     qualquerCorPode: 'qualquer cor pode ser movida para um tubo com coringa.',
   },
 
+  updateReady: {
+    tituloDisponivel: 'Nova atualização disponível',
+    tituloNovidades: 'Última atualização',
+    notas: [
+      '🍇 Cor nova nos tubos: vinho-violeta!',
+      '💀 Modo Extremo turbinado — desafio de verdade em toda fase',
+      '💡 Dica mais esperta: sempre aponta uma saída',
+      '✨ Visual polido e tudo mais estável por dentro',
+    ],
+    depois: 'Depois',
+    instalarAgora: 'Instalar agora',
+    ok: 'OK',
+  },
+
   modes: {
     zen: {
       name: 'Zen',
@@ -147,7 +161,7 @@ export const ptBR: Dictionary = {
     extreme: {
       name: 'Extremo',
       tagline: 'Uma jogada errada e acabou',
-      description: 'Mais cores, menos espaço vazio. Sem voltar atrás, sem tubo extra. Apenas 3 dicas.',
+      description: 'Mais cores e mecânicas desde cedo. Sem voltar atrás, sem tubo extra. Apenas 3 dicas.',
     },
   },
 

@@ -21,6 +21,9 @@ import type { MusicTrack, MusicMood } from './audio/engine';
 import type { LevelConfig, GeneratedLevel } from './core/generator';
 import { isFullscreenAvailable, isFullscreenActive, toggleFullscreen, isMobileDevice, isStandalone } from './lib/fullscreen';
 import { ImmersionOnboarding } from './ui/ImmersionOnboarding';
+import { UpdateReadyModal } from './ui/UpdateReadyModal';
+import { setUpdateReadyHandler } from './lib/pwaRegister';
+import { markInstallPending, markVersionSeen, resolveVersionCatchUp } from './lib/appVersion';
 import { useT } from './i18n/context';
 
 type Screen = 'menu' | 'game';
@@ -122,6 +125,15 @@ let qaFailsLeft = Math.max(0, Number(QA.get('failgen')) || 0);
 const QA_NO_PREFETCH = QA.get('prefetch') === 'off';
 const QA_SIM_ACTIVE = QA_SLOW_GEN_MS > 0 || qaFailsLeft > 0;
 
+// `?testupdate=1` — unlike the params above, this one is INTENTIONALLY NOT gated by IS_LOCAL:
+// it only surfaces the "update installed" modal and, if tapped, reloads the page — both actions
+// a real player could trigger harmlessly themselves (there's no degraded gameplay, no hidden
+// data, nothing to sabotage by sharing the link). Left live on the public site on purpose, so
+// the direction can test the real flow on a real phone against the deployed build, not just on
+// localhost. Read directly from the URL (not the IS_LOCAL-gated `QA` object above).
+const TEST_UPDATE_MODAL = typeof window !== 'undefined'
+  && new URLSearchParams(window.location.search).get('testupdate') === '1';
+
 /** UI-path generation: the real worker call wrapped with the QA simulation knobs above. */
 function generateForUI(cfg: LevelConfig, maxAttempts?: number, seed?: number): Promise<GeneratedLevel> {
   let base: Promise<GeneratedLevel>;
@@ -149,6 +161,7 @@ export function App() {
   const currentBossRef = useRef<BossData | null>(null);
   const journeyModeRef = useRef<JourneyMode>('balanced');
   const skipVictoryRef = useRef(false);
+  const screenRef = useRef<Screen>('menu'); // read inside closures that must never see a stale screen (PWA update handler)
   const savedSessionDataRef = useRef<GameSession | null>(null);
 
   // Persistence
@@ -277,6 +290,20 @@ export function App() {
   // Hint is computing in the worker — disable the button so requests don't stack up
   const [hintPending, setHintPending] = useState(false);
   const [showWildTutorial, setShowWildTutorial] = useState(false);
+  // PWA update, variant 'available' — an update is downloaded and waiting, offered while the
+  // player is idle (menu) or deferred until they return there. `applyNow` is only ever populated
+  // by the pwaRegister bridge (never invented locally) — calling it does skipWaiting + reload. A
+  // phase in progress must never be interrupted (real field complaint, 2026-07-09: a silent
+  // auto-reload used to fire mid-pour) — see updatePendingRef below.
+  const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const updateApplyRef = useRef<null | (() => void)>(null);
+  // Set when an update arrives while `screen === 'game'` — goMenu() checks this and shows the
+  // modal only once it's actually safe to interrupt the player.
+  const updatePendingRef = useRef(false);
+  // PWA update, variant 'whatsNew' — the update already applied itself in the background and the
+  // player never saw the 'available' offer (see src/lib/appVersion.ts). Informational, one-time,
+  // resolved once at boot — independent of the live update-ready event above.
+  const [showWhatsNewModal, setShowWhatsNewModal] = useState(false);
   // power-up limits from scene (-1 = unlimited)
   const [undosLeft, setUndosLeft] = useState(-1);
   const [hintsLeft, setHintsLeft] = useState(-1);
@@ -312,6 +339,51 @@ export function App() {
   // keep refs in sync
   useEffect(() => { skipVictoryRef.current = skipVictory; }, [skipVictory]);
   useEffect(() => { journeyModeRef.current = journeyMode; }, [journeyMode]);
+  useEffect(() => { screenRef.current = screen; }, [screen]);
+
+  // PWA update bridge: registers ONCE. pwaRegister calls this the moment a new version is ready
+  // (any time after mount — could be seconds or hours later). At the menu, show the modal right
+  // away; mid-game, defer it (updatePendingRef) until goMenu() decides it's safe. Shared by the
+  // real registration, the localhost-only QA hook, and the public `?testupdate=1` trigger below —
+  // all three must behave identically, so there's exactly one implementation.
+  useEffect(() => {
+    const onUpdateReady = (applyNow: () => void) => {
+      updateApplyRef.current = applyNow;
+      if (screenRef.current === 'game') updatePendingRef.current = true;
+      else setShowUpdateModal(true);
+    };
+    setUpdateReadyHandler(onUpdateReady);
+    // Debug/QA only (localhost, see IS_LOCAL): lets a test drive the exact "update ready" moment
+    // without depending on a real Workbox/service-worker round-trip, which is notoriously flaky
+    // to orchestrate in headless Chrome.
+    if (IS_LOCAL) {
+      (window as unknown as { __simulateUpdateReady: (applyNow: () => void) => void }).__simulateUpdateReady = onUpdateReady;
+    }
+    // `?testupdate=1` (see TEST_UPDATE_MODAL above) — works in ANY environment, including the
+    // deployed site, so this can be tested on a real phone. applyNow does a genuine reload —
+    // "instalar agora" is exactly as real as it would be for an actual update. Strip the param
+    // right away (history.replaceState, no navigation) so that reload doesn't re-arm itself and
+    // loop forever — a real update is driven by service-worker state, never by the URL, so a real
+    // player's reload is always clean; this self-clearing only matters for manual testing.
+    if (TEST_UPDATE_MODAL) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('testupdate');
+      window.history.replaceState(null, '', url);
+      // Never CLOBBER a real pending update (found in security review): if a genuine service
+      // worker update resolved before this mount, setUpdateReadyHandler above already delivered
+      // its applyNow (skipWaiting + reload) into updateApplyRef — replacing it with a bare
+      // reload would leave the new worker stuck in `waiting`. The test trigger only arms itself
+      // when nothing real is pending; a real update arriving LATER still overrides it (correct
+      // direction: real wins).
+      if (!updateApplyRef.current) onUpdateReady(() => window.location.reload());
+    }
+
+    // Variant 'whatsNew': resolved ONCE at boot, independent of the live update-ready event above
+    // (covers the update having already applied itself silently — see appVersion.ts). Only at the
+    // menu (the app always boots there) and never alongside variant 'available' in the same tick.
+    const catchUp = resolveVersionCatchUp();
+    if (catchUp === 'whats-new') setShowWhatsNewModal(true);
+  }, []);
 
   // State comes from the EVENT, never from the click — ESC / Android Back exit "externally".
   useEffect(() => {
@@ -896,6 +968,12 @@ export function App() {
         setHasSavedSession(true);
       }
     }
+    // An update arrived while a phase was in progress — it was deferred (never interrupt
+    // mid-game); now that the player is back at the menu on their own, it's safe to tell them.
+    if (updatePendingRef.current) {
+      updatePendingRef.current = false;
+      setShowUpdateModal(true);
+    }
     setBossActive(false);
     sceneRef.current?.disableBossMode();
     currentBossRef.current = null;
@@ -919,9 +997,26 @@ export function App() {
 
   const handleUndo = () => sceneRef.current?.undo();
 
-  /** Hint: when there are no moves, points to the way out instead of searching for a play. */
+  /** Hint: ALWAYS asks the solver first — never routes off the `deadlocked` flag alone. That flag
+   *  only covers the "hard" deadlock (no legal pour at all); a "soft" deadlock (legal pours exist,
+   *  but none of them lead to a win — or the solver's search budget ran out) left `deadlocked`
+   *  false, so the old flag-gated version silently did nothing on click (real player report,
+   *  2026-07-09). showHint() itself only spends a hint charge when it truly highlights a move
+   *  (scene.ts's `hintUsed++` sits after the "no hint" early-return) — so calling it unconditionally
+   *  here never over-charges the player, including on an already-hard-deadlocked board (the
+   *  solver returns fast there: zero legal moves means nothing to expand). */
   const handleHint = () => {
-    if (deadlocked && !won) {
+    if (hintPending) return; // a request is already in flight — don't stack
+    setHintPending(true);
+    // showHint() also returns false when the BOARD CHANGED while the worker was computing (the
+    // player kept playing during the solve — the stale hint is rightly discarded). That is not
+    // "no way out", so the fallback below must not fire a misleading "no moves" toast; compare
+    // the move counter to tell the two apart (found in this round's correctness review).
+    const movesAtClick = sceneRef.current?.moves;
+    sceneRef.current?.showHint().then((ok) => {
+      if (ok) return; // a move was found and highlighted — nothing else to do
+      if (sceneRef.current && sceneRef.current.moves !== movesAtClick) return; // stale, not stuck
+      // No move leads anywhere: point to the way out instead of leaving the click do nothing.
       if (tubesLeft !== 0) {
         setHintNudge(['tube']);
         setToast({ msg: t.hud.semMovimentosAdicioneTubo, id: Date.now() });
@@ -935,11 +1030,7 @@ export function App() {
           id: Date.now(),
         });
       }
-      return;
-    }
-    if (hintPending) return; // a request is already in flight — don't stack
-    setHintPending(true);
-    sceneRef.current?.showHint().finally(() => setHintPending(false));
+    }).finally(() => setHintPending(false));
   };
 
   const handleAddTube = () => sceneRef.current?.addEmptyTube();
@@ -1147,37 +1238,50 @@ export function App() {
       {/* ── HUD (in-game only) ───────────────────────────────────────── */}
       {screen === 'game' && (
         <>
-          <div id="hud-top" className="pointer-events-none fixed inset-x-0 top-0 z-10 grid grid-cols-3 items-start px-4 pt-[env(safe-area-inset-top)]">
-            {/* Left — Menu button (goes straight to the home screen) + passive phase/difficulty */}
-            <div className="mt-3 flex items-center gap-2">
-              <MenuButton label={t.common.menu} onClick={goMenu} />
-              <div className="rounded-lg bg-slate-900/55 px-2.5 py-1 backdrop-blur">
-                <div className="text-sm font-semibold leading-tight text-slate-100">
-                  {isBoss ? (currentBossRef.current ? bossText(currentBossRef.current).name : t.hud.chefao) : mode === 'daily' ? t.hud.diario : t.hud.fase(phase + 1)}
-                </div>
-                {mode !== 'daily' && (
-                  <div className={`text-[11px] leading-tight ${isBoss ? 'text-red-300' : 'text-slate-400'}`}>{label}</div>
-                )}
+          {/* HUD layout (direction's spec, 2026-07-09): row 1 keeps the ORIGINAL spirit —
+              Menu left, coins DEAD-CENTER (shop entry), moves right — via grid
+              [1fr_auto_1fr]: the side tracks are equal, so the coin pill sits on the exact
+              geometric center and grows symmetrically (★999999 still fits: ~110px pill +
+              ~90px sides in a 390px viewport). Row 2 gives the phase/boss name + difficulty
+              the WHOLE remaining width (min-w-0 truncate — the only block that ever yields),
+              with optimal/boss-tag anchored right. Nothing can overlap: every fixed block is
+              shrink-0/whitespace-nowrap, and the flexible one truncates. Field bug + layout
+              iteration history: decanta-internal/ROTEIRO-CORRECOES-2026-07-09.md (studio). */}
+          <div id="hud-top" className="pointer-events-none fixed inset-x-0 top-0 z-10 flex flex-col gap-1.5 px-3 pt-[env(safe-area-inset-top)]">
+            {/* Row 1 — Menu ····· coins (exact center) ····· moves */}
+            <div className="mt-2.5 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+              <div className="justify-self-start">
+                <MenuButton label={t.common.menu} onClick={goMenu} />
               </div>
-            </div>
-
-            {/* Center — coin pill with "+" (obvious shop) */}
-            <div className="mt-3 flex justify-center">
               <CoinPill coins={wallet.coins} onClick={() => setShowShop(true)} innerRef={coinHudRef} />
-            </div>
-
-            {/* Right — moves; optimal hidden in Zen; boss tag */}
-            <div className="mt-3 flex flex-col items-end gap-1">
-              <div className="rounded-xl bg-slate-900/75 px-3 py-1.5 text-sm font-medium text-slate-100 backdrop-blur">
+              <div className="justify-self-end whitespace-nowrap rounded-xl bg-slate-900/75 px-3 py-1.5 text-sm font-medium text-slate-100 backdrop-blur">
                 {t.common.jogadas(moves)}
               </div>
+            </div>
+
+            {/* Row 2 — phase/boss + difficulty (CONTENT-SIZED pill, like every other HUD block —
+                direction 2026-07-09: a full-width bar here clashed with the adaptive pills
+                above). The flexible spacer between pill and optimal absorbs the free width; the
+                pill can still shrink+truncate if a long boss name meets a narrow viewport. */}
+            <div className="flex items-center gap-2">
+              <div className="min-w-0 truncate rounded-lg bg-slate-900/55 px-2.5 py-1 backdrop-blur">
+                <span className="text-sm font-semibold leading-tight text-slate-100">
+                  {isBoss ? (currentBossRef.current ? bossText(currentBossRef.current).name : t.hud.chefao) : mode === 'daily' ? t.hud.diario : t.hud.fase(phase + 1)}
+                </span>
+                {mode !== 'daily' && (
+                  <span className={`text-xs leading-tight ${isBoss ? 'text-red-300' : 'text-slate-400'}`}>
+                    {' · '}{label}
+                  </span>
+                )}
+              </div>
+              <div className="min-w-0 flex-1" />
               {optimalMoves > 0 && !isBoss && !(mode === 'journey' && journeyMode === 'zen') && (
-                <div className="rounded-lg bg-slate-900/55 px-2.5 py-0.5 text-xs text-slate-400 backdrop-blur">
+                <div className="shrink-0 whitespace-nowrap rounded-lg bg-slate-900/55 px-2.5 py-1 text-xs text-slate-400 backdrop-blur">
                   {t.hud.otimo(optimalMoves)}
                 </div>
               )}
               {isBoss && bossActive && (
-                <div className="rounded-lg bg-red-900/70 px-2.5 py-0.5 text-xs text-red-300 backdrop-blur">
+                <div className="shrink-0 whitespace-nowrap rounded-lg bg-red-900/70 px-2.5 py-1 text-xs text-red-300 backdrop-blur">
                   {t.hud.chefaoTag}
                 </div>
               )}
@@ -1447,6 +1551,27 @@ export function App() {
             setShowWildTutorial(false);
             savePrefs({ ...loadPrefs(), wildTutorialShown: true });
           }}
+        />
+      )}
+
+      {/* ── PWA UPDATE — 'available' takes priority over 'whatsNew' if both were somehow true
+          at once (shouldn't happen by construction, but 'available' is the actionable one). ── */}
+      {showUpdateModal && screen === 'menu' && (
+        <UpdateReadyModal
+          variant="available"
+          notes={t.updateReady.notas}
+          onClose={() => setShowUpdateModal(false)}
+          onInstallNow={() => {
+            markInstallPending();
+            updateApplyRef.current?.();
+          }}
+        />
+      )}
+      {!showUpdateModal && showWhatsNewModal && screen === 'menu' && (
+        <UpdateReadyModal
+          variant="whatsNew"
+          notes={t.updateReady.notas}
+          onClose={() => { setShowWhatsNewModal(false); markVersionSeen(); }}
         />
       )}
     </>
